@@ -1,0 +1,12 @@
+<Project>
+  <PropertyGroup>
+    <Product>DataSource</Product>
+    <AssemblyTitle>DataSource</AssemblyTitle>
+    <!-- MinVer: derives Version from git tags (e.g. v1.0.0 → 1.0.0) -->
+    <MinVerTagPrefix>v</MinVerTagPrefix>
+    <MinVerDefaultPreReleaseIdentifiers>dev</MinVerDefaultPreReleaseIdentifiers>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="MinVer" Version="7.0.0" PrivateAssets="All" Condition="$(MSBuildProjectExtension) == '.csproj'" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,578 @@
+using PSTT.Data;
+using System;
+using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
+using System.Diagnostics;
+using System.Text;
+using System.IO.MemoryMappedFiles;
+
+namespace PSTT.Data
+{
+    public class CacheWithWildcards<TKey, TValue> : Cache<TKey, TValue>
+        where TKey : notnull
+    {
+        private readonly IWildcardMatcher<TKey>? _matcher;
+
+        /// <summary>
+        /// The pattern matcher used to determine whether a key is a wildcard and to match patterns
+        /// against candidate keys. Defaults to <see cref="MqttWildcardMatcher"/> when <typeparamref name="TKey"/>
+        /// is <see cref="string"/> and no matcher is supplied.
+        /// </summary>
+        public IWildcardMatcher<TKey>? WildcardMatcher => _matcher;
+
+        public CacheWithWildcards() : this(new CacheConfig<TKey, TValue>(), null)
+        {
+        }
+
+        public CacheWithWildcards(CacheConfig<TKey, TValue> config) : this(config, null)
+        {
+        }
+
+        public CacheWithWildcards(CacheConfig<TKey, TValue> config, IWildcardMatcher<TKey>? matcher) : base(config)
+        {
+            _matcher = matcher ?? (typeof(TKey) == typeof(string) ? (IWildcardMatcher<TKey>)(object)new MqttWildcardMatcher() : null);
+        }
+
+        internal class TreeNode
+        {
+            public TreeNode(TKey key, ItemNode? parent)
+            {
+                KeyPart = key;
+                Parent = parent;
+                if (parent == null)//rootnode
+                    throw new InvalidOperationException($"Parent node is null");
+                else if (parent.Path == null)
+                    throw new InvalidOperationException($"Parent node '{parent.KeyPart}' has null path");
+                else if (parent.Path == "")
+                    Path = key.ToString()!;
+                else
+                    Path = $"{parent.Path}/{key}";
+            }
+
+            // dummy constructor for testing only...
+            internal TreeNode(TKey key, string path)
+            {
+                KeyPart = key;
+                Parent = null;
+                Path = path;
+            }
+
+            public TKey KeyPart { get; init; }
+            public string Path {  get; init; }
+            public ItemNode? Parent { get; init; }
+            public CacheItemWithWildcards Sub { get; set; } = null!;
+        }
+
+        internal class ItemNode : TreeNode
+        {
+            public ItemNode(TKey key, ItemNode? parent) : base(key, parent)
+            {
+            }
+            // dummy constructor for testing only...
+            internal ItemNode(TKey key, string path) : base(key, path)
+            {
+            }
+
+            public List<ItemNode> Children { get; init; } = new();
+
+            // if the node a wildcard?
+            // in which case the key below the wildcard is saved as a filter below this node
+            // - any node below us that updates then searches up the tree looking for wildcard
+            //   and if matches then updates that sub too
+            public List<TreeNode> Filters { get; init; } = new();
+        }
+
+        internal class RootNode : ItemNode
+        {
+            public RootNode() : base(default!, "")
+            {
+            }
+
+        }
+
+        internal class FilterNode : TreeNode
+        {
+            public FilterNode(TKey key, ItemNode parent, string[] filter) : base(key, parent)
+            {
+                // first item of filter array shoul dbe the wildcard...the code before this point should have stripped
+                // all leadin matching parts of the filter and then created a filter node with the remaining filter parts
+                if (filter == null) throw new ArgumentNullException(nameof(filter));
+                if (filter.Length == 0) throw new ArgumentException("Filter array must have at least one part", nameof(filter));
+                if (filter[0] != "#" && filter[0] != "+") throw new ArgumentException("First part of filter array must be a wildcard (# or +)", nameof(filter));
+
+                Filter = filter;
+            }
+
+            internal FilterNode(TKey key, string path, string[] filter) : base(key, path)
+            {
+                Filter = filter;
+            }
+
+            public string[] Filter { get; init; }
+            public bool Matches(string? other)
+            {
+                if (other == null) throw new ArgumentNullException(nameof(other));
+
+                // path is up to parent e.g. "topic1/topic2"
+                string path = Parent?.Path!;
+                if (path == null) throw new InvalidOperationException($"Filter node '{KeyPart}' has null parent key");
+
+                // if path is "" then we're one level from the root
+                // - so either an exact match or single wildcard...
+                if (path.Length == 0)
+                {
+                    // # at root just matches everything
+                    if (Filter.Length == 1 && Filter[0] == "#")
+                        return true;
+                    // + at root just matches single level so only matches if other has no "/" in it
+                    if (Filter.Length == 1 && Filter[0] == "+")
+                    {
+                        return !other.Contains("/");
+                    }
+                    // just double check--filter MUST be + something if we're here
+                    if (Filter[0] != "+")
+                        throw new InvalidOperationException($"Filter node '{KeyPart}' has invalid filter part '{Filter[0]}' - first part of filter array must be a wildcard +");
+
+                    // if we have more than one filter part then we need to check the rest of the filter against the other string
+                }
+                else
+                {
+                    // so if other doesnt start with that and "/" then not a macth
+                    if (!other.StartsWith(path) || (other.Length > path.Length && other[path.Length] != '/'))
+                        return false;
+
+                    // if other is exactly the same as path then only a match if filter is "#" or "+" and has no more parts
+                    if (other.Length == path.Length)// length match as already checked "StartsWith"
+                    {
+                        return Filter.Length == 1 && (Filter[0] == "#" || Filter[0] == "+");
+                    }
+
+                    // get rest of topic after parent/
+                    other = other[(path.Length + 1)..];
+                }
+
+                // and split into parts
+                // TODO: we ought to be able to just move along the other string and not have to split it
+                string[] othera = other.Split('/');
+                // and compare to filter parts
+                for (int i=0; i<Filter.Length; i++)
+                {
+                    var filterPart = Filter[i];
+                    if (filterPart == "#")
+                    {
+                        // matches anything remaining -- but must match something
+                        // -- if run out of othera then fail (e.g. "a/#" does not match "a")
+                        if (i >= othera.Length)
+                            return false;
+                        return true;
+                    }
+                    else if (filterPart == "+")
+                    {
+                        // matches any single part so just continue
+                    }
+                    else
+                    {
+                        // must match exactly
+                        if (i >= othera.Length || filterPart != othera[i])
+                            return false;
+                    }
+                }
+                // still here so all filter parts matched
+                // -- but if we have more other parts then only a match if last filter part was "#"
+                if (othera.Length > Filter.Length)
+                    return Filter.Length > 0 && Filter[^1] == "#";
+                return true;
+            }
+
+        }
+
+        internal RootNode root = new();
+
+        public struct Counts
+        {
+            public int SubCount;
+            public int ItemCount;
+            public int FilterCount;
+        }
+
+        public Counts GetCounts()
+        {
+            Counts ret;
+            ret.SubCount = 0;
+            ret.ItemCount = 0;
+            ret.FilterCount = 0;
+
+            var stack = new Stack<TreeNode>();
+            stack.Push(root);
+            while (stack.Count > 0)
+            {
+                var node = stack.Pop();
+                if (node.Sub != null)
+                    ret.SubCount++;
+                if (node is ItemNode itemNode)
+                {
+                    ret.ItemCount++;
+                    foreach (var child in itemNode.Children)
+                        stack.Push(child);
+                    foreach (var filter in itemNode.Filters)
+                        stack.Push(filter);
+                }
+                else if (node is FilterNode filterNode)
+                {
+                    ret.FilterCount++;
+                }
+            }
+            return ret;
+        }
+
+        internal class CacheItemWithWildcards : CacheItem<TKey, TValue>
+        {
+            private readonly bool _isWildcard;
+
+            public CacheItemWithWildcards(CacheWithWildcards<TKey, TValue> source, TKey key, bool retain, TreeNode node)
+                : base(source, key, retain)
+            {
+                Node = node;
+                _isWildcard = node is FilterNode;
+
+                // Only take ownership of the node if it has no primary collection yet.
+                // ConcurrentDictionary.GetOrAdd may invoke NewItem concurrently for the same key;
+                // the throwaway duplicate must not overwrite the stored collection's node reference
+                // or register a duplicate upstream subscription.
+                // NewItem runs inside lock(root), so this check is safe.
+                if (node.Sub == null)
+                {
+                    node.Sub = this;
+                    if (source.Upstream != null && (!_isWildcard || source.UpstreamSupportsWildcards))
+                        UpstreamSub = source.Upstream.Subscribe(key, UpstreamCallbackWildcards);
+                }
+            }
+
+            TreeNode Node { get; init; }
+
+            // Per-key upstream value cache for wildcard subscriptions.
+            // Solves the delivery race: upstream fires InitialInvokeAsync fire-and-forget before the
+            // downstream subscriber is registered (NewItem runs inside _cache.GetOrAdd, before col.Add).
+            // By caching here, InitialInvokeAsync can replay values to newly-registered subscribers
+            // regardless of timing. Works for any ICache<TKey,TValue> upstream implementation.
+            private readonly Dictionary<TKey, (TValue value, IStatus status)> _upstreamCache = new();
+            private readonly object _upstreamCacheLock = new();
+
+            internal async Task UpstreamCallbackWildcards(ISubscription<TKey, TValue> sub)
+            {
+                if (_isWildcard)
+                {
+                    // Each upstream callback carries a specific matching key (e.g. "sensors/temp").
+                    // Concurrent callbacks for different keys must not race-overwrite each other through
+                    // collection.Value, so we cache per-key and route directly to subscribers.
+                    if (!sub.Status.IsPending)
+                        lock (_upstreamCacheLock) { _upstreamCache[sub.Key] = (sub.Value, sub.Status); }
+                    await InvokeCallback(sub);
+                }
+                else
+                {
+                    await PublishAsync(sub.Value, sub.Status);
+                }
+            }
+
+            internal class SubscriptionCopy : ISubscription<TKey, TValue>
+            {
+                internal SubscriptionCopy(ISubscription<TKey, TValue> other)
+                {
+                    Key = other.Key;
+                    Value = other.Value;
+                    Status = other.Status;
+                }
+                public TKey Key { get; init; }
+
+                public IStatus Status { get; init; }
+
+                public TValue Value { get; init; }
+
+                public void Dispose() { }
+            }
+
+            private sealed class CachedUpstreamValue : ISubscription<TKey, TValue>
+            {
+                internal CachedUpstreamValue(TKey key, TValue value, IStatus status)
+                {
+                    Key = key; Value = value; Status = status;
+                }
+                public TKey Key { get; }
+                public TValue Value { get; }
+                public IStatus Status { get; }
+                public void Dispose() { }
+            }
+
+            internal override int MaxCallbackConcurrency
+            {
+                get
+                {
+                    if (Node is FilterNode)
+                    {
+                        // wildcard node so we need to allow unlimited concurrency as we dont know how many matches there will be when we fire the callback
+                        return -1;
+                    }
+                    return base.MaxCallbackConcurrency;
+                }
+            }
+
+            // this item has had an update and all subscriptions have been fired,
+            // so now we need to check if we have any wildcard subscribers above us in the tree and fire them too
+            protected override async Task OnInvokeCallback(CancellationToken cancellationToken = default)
+            {
+                // if this is a wildcard node then dont look up the tree
+                if (Node is FilterNode)
+                    return;
+
+                string? thisKey = Node.Sub.Key.ToString();
+                int countCallbacks = 0;
+                ItemNode? node = Node.Parent ?? throw new InvalidOperationException($"Filter node '{Node.KeyPart}' has null parent");
+                while (node != null)
+                {
+                    // for each parent node up the tree...
+                    List<TreeNode> filtersSnapshot;
+                    lock (((CacheWithWildcards<TKey, TValue>)Source).root)
+                    {
+                        filtersSnapshot = node.Filters.ToList();
+                    }
+
+                    if (filtersSnapshot.Count > 0)
+                    {
+                        foreach (var filterNode in filtersSnapshot)
+                        {
+                            if (filterNode is FilterNode fn)
+                            {
+                                if (fn.Matches(thisKey))
+                                {
+                                    countCallbacks++;
+                                    // fire it at wildcard subscriber...but with actual subsription as parameter
+                                    // we need to protect this somehow...make it readonly or a clone
+                                    var dummy = new SubscriptionCopy(Node.Sub);
+                                    _ = fn.Sub.InvokeCallback(dummy, cancellationToken);
+                                }
+                                else
+                                {
+                                    // not a match so do nothing
+                                    Debug.WriteLine($"Filter node '{fn.KeyPart}' with filter '{string.Join('/', fn.Filter)}' does not match key '{thisKey}'");
+                                }
+                            }
+                        }
+                    }
+                    node = node.Parent;
+                }
+                if (countCallbacks == 0)
+                {
+                    Debug.WriteLine($"No filter nodes matched key '{thisKey}'");
+                }
+            }
+
+            internal override async Task InitialInvokeAsync(Subscription<TKey, TValue> sub, CancellationToken cancellationToken = default)
+            {
+                // new sub added to an existing node
+                // - so we need to fire the callback with the current value if there is one
+                // - just defer to base
+                if (Node is ItemNode)
+                {
+                    await base.InitialInvokeAsync(sub, cancellationToken);
+                }
+                else if (Node is FilterNode filterNode)
+                {
+                    // if its a wildcard node we need to fire all the current matches below this node in the tree
+                    // get all child items -- ignore filters as we're looking for actual values
+
+                    ItemNode parent = Node.Parent ?? throw new InvalidOperationException($"Filter node '{Node.KeyPart}' has null parent");
+                    var stack = new Stack<ItemNode>();
+                    stack.Push(parent);
+                    while (stack.Count > 0)
+                    {
+                        // for each node from parent downwards...
+                        // - if it has a value
+                        var node = stack.Pop();
+                        if (node.Sub != null && !node.Sub.Status.IsPending)
+                        {
+                            if (filterNode.Matches(node.Sub.Key.ToString()))
+                            {
+                                // fire it at wildcard subscriber...but with actual subsription as parameter
+                                // we need to protect this somehow...make it readonly or a clone
+                                var dummy = new SubscriptionCopy(node.Sub);
+                                _ = sub.InvokeCallback(dummy, cancellationToken);
+                            }
+                        }
+                        if (node is ItemNode itemNode)
+                        {
+                            List<ItemNode> childrenSnapshot;
+                            lock (((CacheWithWildcards<TKey, TValue>)Source).root)
+                            {
+                                childrenSnapshot = itemNode.Children.ToList();
+                            }
+                            foreach (var child in childrenSnapshot)
+                                stack.Push(child);
+                        }
+                    }
+
+                    // For wildcard upstream subscriptions: replay any upstream values that arrived
+                    // before this subscriber was registered (upstream fires before col.Add completes).
+                    if (UpstreamSub != null)
+                    {
+                        Dictionary<TKey, (TValue value, IStatus status)> snapshot;
+                        lock (_upstreamCacheLock) { snapshot = new Dictionary<TKey, (TValue, IStatus)>(_upstreamCache); }
+
+                        foreach (var (key, (value, status)) in snapshot)
+                        {
+                            var shim = new CachedUpstreamValue(key, value, status);
+                            if (Source.WaitOnSubscriptionCallback)
+                                await sub.InvokeCallback(shim, cancellationToken);
+                            else
+                                _ = sub.InvokeCallback(shim, cancellationToken);
+                        }
+                    }
+                }
+            }
+
+            internal void OnRemove()
+            {
+                Node.Sub = null!;
+
+                var rootNode = ((CacheWithWildcards<TKey, TValue>)Source).root;
+
+                if (Node is FilterNode)
+                {
+                    // filter node so remove from parent filters
+                    lock (rootNode)
+                    {
+                        Node.Parent?.Filters.Remove((TreeNode)Node);
+                    }
+                }
+                else if (Node is ItemNode itemNode)
+                {
+                    // what if I have children? --leave this tree node simply without a subscription
+                    lock (rootNode)
+                    {
+                        if (itemNode.Children.Count == 0)
+                            itemNode.Parent?.Children.Remove(itemNode);
+                    }
+                }
+            }
+        }
+
+        internal override CacheItem<TKey, TValue> NewItem(TKey key)
+        {
+            //
+            // split the key into parts and add it to the tree, navigating down from root
+            // - we are adding new item so final node should not exist already
+            // NOTE: ConcurrentDictionary.GetOrAdd may call this factory concurrently for the
+            // same key. If another thread already added the key to the tree, return a throwaway
+            // wrapper — GetOrAdd will discard it and return the first stored collection.
+            //
+            var parts = key.ToString()!.Split('/');
+            ItemNode node = root;
+            TreeNode? lastNode = null;
+            var isNew = false;
+            var isWildcard = false;
+            string[]? filter = null;
+
+            // use root to lock tree of nodes whilst we find where to stick this one
+            lock (root)
+            {
+                for (int p = 0; p < parts.Length; p++)
+                {
+                    var part = parts[p];
+                    TKey key1 = part is TKey ? (TKey)(object)part : throw new InvalidOperationException($"Part '{part}' is not of type {typeof(TKey).FullName}");
+                    isWildcard = part == "#" || part == "+";
+                    if (isWildcard)
+                    {
+                        // remainder of parts array is now a filter
+                        filter = parts[p..];
+
+                        var filterNode = node.Filters.Find(c => c.Equals(filter));
+                        if (filterNode != null)
+                        {
+                            // Concurrent GetOrAdd: another thread already added this wildcard key.
+                            // Return a throwaway wrapper; GetOrAdd will discard it.
+                            lastNode = filterNode;
+                            break;
+                        }
+                        filterNode = new FilterNode(key1, node, filter);
+                        node.Filters.Add(filterNode);
+                        lastNode = filterNode;
+                        break;
+                    }
+                    else
+                    {
+                        if (part.Contains('#') || part.Contains('+'))
+                            throw new ValidationException($"Invalid key part '{part}' in key '{key}' - wildcard characters '#' and '+' are not allowed in key parts");
+
+                        var child = node.Children.Find(c => c.KeyPart.Equals(part));
+                        if (child != null)
+                        {
+                            node = child;
+                            isNew = false;
+                        }
+                        else
+                        {
+
+                            child = new ItemNode(key1, node);
+                            node.Children.Add(child);
+                            isNew = true;
+                        }
+                        lastNode = node = child;
+                    }
+                }
+                // If !isNew && !isWildcard: concurrent GetOrAdd called us twice for the same key.
+                // Return a throwaway wrapper; ConcurrentDictionary will discard it.
+                if (lastNode == null)
+                    throw new InvalidOperationException($"Key '{key}' failed to set last node in tree search");
+
+                var ret = new CacheItemWithWildcards(this, key, false, lastNode);
+
+                return ret;
+            }
+        }
+
+        internal override void RemoveItem(CacheItem<TKey, TValue> col)
+        {
+            var sct = col as CacheItemWithWildcards;
+            if (sct == null)
+                throw new InvalidOperationException("Expected CacheItemWithWildcards in RemoveItem");
+
+            // Null out UpstreamSub before calling base.RemoveItem so the base doesn't double-unsubscribe.
+            // We handle unsubscription here where we have the correctly-typed reference.
+            if (Upstream != null && sct.UpstreamSub != null)
+            {
+                Upstream.Unsubscribe(sct.UpstreamSub);
+                sct.UpstreamSub = null;
+            }
+
+            lock (root)
+            {
+                sct.OnRemove();
+            }
+            base.RemoveItem(col); // handles cache removal; upstream unsubscribe is skipped (UpstreamSub is null)
+        }
+
+        /// <summary>
+        /// Clears the cache dictionary AND resets all tree node references so that
+        /// <see cref="NewItem"/> can safely re-create collections for the same keys.
+        /// </summary>
+        public override void Clear()
+        {
+            lock (root)
+            {
+                ResetTreeNodes(root);
+            }
+            base.Clear();
+        }
+
+        private static void ResetTreeNodes(ItemNode node)
+        {
+            node.Sub = null!;
+            foreach (var child in node.Children)
+                ResetTreeNodes(child);
+            foreach (var filter in node.Filters)
+                filter.Sub = null!;
+        }
+
+    }
+}
+

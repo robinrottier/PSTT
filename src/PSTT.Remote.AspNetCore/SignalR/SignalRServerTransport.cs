@@ -25,6 +25,9 @@ namespace PSTT.Remote.AspNetCore.SignalR
         /// <summary>No-op: the SignalR framework manages the listener lifecycle.</summary>
         public Task StopAsync() => Task.CompletedTask;
 
+        /// <summary>The number of currently connected clients.</summary>
+        public int ConnectionCount => _connections.Count;
+
         public async Task OnClientConnectedAsync(string connectionId, ISingleClientProxy caller)
         {
             var transport = new SignalRConnectionTransport(connectionId, caller);

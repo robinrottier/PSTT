@@ -36,6 +36,7 @@ namespace PSTT.Data
         internal bool IsActive { get; set; } = true;
         public void Dispose()
         {
+            IsActive = false;
         }
 
         public void HandleFailStatus()

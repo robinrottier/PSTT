@@ -365,9 +365,9 @@ namespace PSTT.Data
         internal bool ForwardPublishToUpstream { get; private set; }
 
         /// <summary>
-        /// Sets the upstream DataSource. Called by CacheBuilder after construction.
+        /// Sets the upstream DataSource. Can be called after construction to wire in an upstream.
         /// </summary>
-        internal void SetUpstream(ICache<TKey, TValue> upstream, bool supportsWildcards = false, bool forwardPublish = false)
+        public void SetUpstream(ICache<TKey, TValue> upstream, bool supportsWildcards = false, bool forwardPublish = false)
         {
             Upstream = upstream;
             UpstreamSupportsWildcards = supportsWildcards;

@@ -34,6 +34,9 @@ namespace PSTT.Mqtt
         private bool _connected;
         private bool _disposed;
 
+        /// <summary>Returns true when the client is currently connected to the MQTT broker.</summary>
+        public bool IsConnected => _connected;
+
         /// <summary>
         /// Create an MQTT data source that connects to the given broker.
         /// </summary>

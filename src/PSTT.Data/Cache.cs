@@ -441,6 +441,10 @@ namespace PSTT.Data
             get { return _cache.Count; }
         }
 
+        public virtual IReadOnlyDictionary<TKey, TValue> GetSnapshot() =>
+            _cache.Where(kv => kv.Value.Status.State != IStatus.StateValue.Pending)
+                  .ToDictionary(kv => kv.Key, kv => kv.Value.Value);
+
         public TValue? GetValue(TKey key)
         {
             TryGetValue(key, out var val);

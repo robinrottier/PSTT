@@ -34,6 +34,9 @@ namespace PSTT.Data
         void Clear();
         int Count { get; }
 
+        /// <summary>Returns a point-in-time snapshot of all retained/active key-value pairs.</summary>
+        IReadOnlyDictionary<TKey, TValue> GetSnapshot();
+
         // pub operations
         // -- publish a value and trigger updates to subscribers
         // -- retain flag means that value will stay in cache even if no current subscribers

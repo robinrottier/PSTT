@@ -286,6 +286,10 @@ namespace PSTT.Data
             await Task.CompletedTask;
         }
 
+        // Wildcard items override this to always return true because InitialInvokeAsync must walk
+        // the subtree for existing matches regardless of the item's own status.
+        internal virtual bool NeedsInitialInvoke => !Status.IsPending;
+
         internal virtual async Task InitialInvokeAsync(Subscription<TKey, TValue> sub, CancellationToken cancellationToken = default)
         {
             // if the sub already has a value then fire callback too
@@ -456,10 +460,23 @@ namespace PSTT.Data
 
         internal virtual CacheItem<TKey, TValue> NewItem(TKey key)
         {
-            var col = new CacheItem<TKey, TValue>(this, key);
-            if (Upstream != null)
-                col.UpstreamSub = Upstream.Subscribe(key, col.UpstreamCallback);
-            return col;
+            return new CacheItem<TKey, TValue>(this, key);
+        }
+
+        /// <summary>
+        /// Ensures the cache item has an upstream subscription, attaching one lazily if needed.
+        /// Called from <see cref="Subscribe"/> so that upstream subscriptions are only created
+        /// when there is a real local subscriber — never as a side-effect of <see cref="PublishAsync"/>.
+        /// Thread-safe: uses <c>lock(col)</c> to guard against concurrent Subscribe calls for the same key.
+        /// </summary>
+        internal virtual void AttachUpstream(CacheItem<TKey, TValue> col)
+        {
+            if (Upstream == null || col.UpstreamSub != null) return;
+            lock (col)
+            {
+                if (col.UpstreamSub != null) return;
+                col.UpstreamSub = Upstream.Subscribe(col.Key, col.UpstreamCallback);
+            }
         }
 
         public ISubscription<TKey, TValue> Subscribe(TKey key, Func<ISubscription<TKey, TValue>, Task> callback)
@@ -490,7 +507,13 @@ namespace PSTT.Data
                     return NewItem(k);
                 });
 
+                // Lazily attach upstream subscription when the first real subscriber arrives.
+                // Items created by PublishAsync have no upstream sub yet; items created here
+                // (new key) also need attaching. Both cases are handled identically.
+                AttachUpstream(col);
+
                 Subscription<TKey, TValue> sub;
+                bool shouldInitialInvoke;
                 lock (col)
                 {
                     if (col.Count >= MaxSubscriptionsPerTopic && MaxSubscriptionsPerTopic > 0)
@@ -499,13 +522,19 @@ namespace PSTT.Data
                     }
 
                     sub = col.Add(callback);
+                    // Capture the status atomically with the subscription add. If there is already
+                    // a value we must fire the initial callback; if not, any incoming value will
+                    // arrive via InvokeCallback which already includes this subscriber.
+                    shouldInitialInvoke = col.NeedsInitialInvoke;
                 }
 
-                // if the sub already has a value then fire callback too
-                if (WaitOnSubscriptionCallback)
-                    col.InitialInvokeAsync(sub).Wait();
-                else
-                    _ = col.InitialInvokeAsync(sub);
+                if (shouldInitialInvoke)
+                {
+                    if (WaitOnSubscriptionCallback)
+                        col.InitialInvokeAsync(sub).Wait();
+                    else
+                        _ = col.InitialInvokeAsync(sub);
+                }
 
                 return sub;
             }

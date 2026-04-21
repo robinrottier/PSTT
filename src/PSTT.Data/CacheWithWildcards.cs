@@ -237,16 +237,17 @@ namespace PSTT.Data
 
                 // Only take ownership of the node if it has no primary collection yet.
                 // ConcurrentDictionary.GetOrAdd may invoke NewItem concurrently for the same key;
-                // the throwaway duplicate must not overwrite the stored collection's node reference
-                // or register a duplicate upstream subscription.
+                // the throwaway duplicate must not overwrite the stored collection's node reference.
                 // NewItem runs inside lock(root), so this check is safe.
                 if (node.Sub == null)
-                {
                     node.Sub = this;
-                    if (source.Upstream != null && (!_isWildcard || source.UpstreamSupportsWildcards))
-                        UpstreamSub = source.Upstream.Subscribe(key, UpstreamCallbackWildcards);
-                }
             }
+
+            internal bool IsWildcard => _isWildcard;
+
+            // Wildcard items must always run InitialInvokeAsync so it can walk the subtree
+            // for existing matching items, even though the filter node itself has no value.
+            internal override bool NeedsInitialInvoke => _isWildcard || !Status.IsPending;
 
             TreeNode Node { get; init; }
 
@@ -322,10 +323,15 @@ namespace PSTT.Data
             protected override async Task OnInvokeCallback(CancellationToken cancellationToken = default)
             {
                 // if this is a wildcard node then dont look up the tree
+                Debug.Assert(Node != null, $"Node is null");
                 if (Node is FilterNode)
                     return;
 
+                Debug.Assert(Node.Sub != null, $"Node has null subscription");
+                Debug.Assert(Node.Sub.Key != null, $"Node has null subscription key");
+
                 string? thisKey = Node.Sub.Key.ToString();
+
                 int countCallbacks = 0;
                 ItemNode? node = Node.Parent ?? throw new InvalidOperationException($"Filter node '{Node.KeyPart}' has null parent");
                 while (node != null)
@@ -549,6 +555,18 @@ namespace PSTT.Data
                 sct.OnRemove();
             }
             base.RemoveItem(col); // handles cache removal; upstream unsubscribe is skipped (UpstreamSub is null)
+        }
+
+        internal override void AttachUpstream(CacheItem<TKey, TValue> col)
+        {
+            if (Upstream == null || col.UpstreamSub != null) return;
+            var item = (CacheItemWithWildcards)col;
+            lock (col)
+            {
+                if (item.UpstreamSub != null) return;
+                if (!item.IsWildcard || UpstreamSupportsWildcards)
+                    item.UpstreamSub = Upstream.Subscribe(col.Key, item.UpstreamCallbackWildcards);
+            }
         }
 
         /// <summary>

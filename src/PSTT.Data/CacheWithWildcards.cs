@@ -474,7 +474,7 @@ namespace PSTT.Data
             var parts = key.ToString()!.Split('/');
             ItemNode node = root;
             TreeNode? lastNode = null;
-            var isNew = false;
+            //var isNew = false;
             var isWildcard = false;
             string[]? filter = null;
 
@@ -513,14 +513,14 @@ namespace PSTT.Data
                         if (child != null)
                         {
                             node = child;
-                            isNew = false;
+                            //isNew = false;
                         }
                         else
                         {
 
                             child = new ItemNode(key1, node);
                             node.Children.Add(child);
-                            isNew = true;
+                            //isNew = true;
                         }
                         lastNode = node = child;
                     }

@@ -228,6 +228,8 @@ namespace PSTT.Data
         internal class CacheItemWithWildcards : CacheItem<TKey, TValue>
         {
             private readonly bool _isWildcard;
+            // Set to true in OnRemove so that any queued async OnInvokeCallback tasks bail out immediately.
+            private volatile bool _removed = false;
 
             public CacheItemWithWildcards(CacheWithWildcards<TKey, TValue> source, TKey key, bool retain, TreeNode node)
                 : base(source, key, retain)
@@ -322,15 +324,26 @@ namespace PSTT.Data
             // so now we need to check if we have any wildcard subscribers above us in the tree and fire them too
             protected override async Task OnInvokeCallback(CancellationToken cancellationToken = default)
             {
+                // Bail out immediately if this item has already been removed.
+                // Without this, hundreds of queued fire-and-forget tasks keep running after
+                // unsubscription, each generating a diagnostic message per MQTT tick.
+                if (_removed)
+                    return;
+
                 // if this is a wildcard node then dont look up the tree
                 Debug.Assert(Node != null, $"Node is null");
                 if (Node is FilterNode)
                     return;
 
-                Debug.Assert(Node.Sub != null, $"Node has null subscription");
-                Debug.Assert(Node.Sub.Key != null, $"Node has null subscription key");
+                // Capture Sub locally — it can be nulled concurrently by OnRemove()
+                var sub = Node.Sub;
+                if (sub == null || sub.Key == null)
+                {
+                    Debug.WriteLine($"Node '{Node.KeyPart}' has null subscription or key — item was removed concurrently, skipping.");
+                    return;
+                }
 
-                string? thisKey = Node.Sub.Key.ToString();
+                string? thisKey = sub.Key.ToString();
 
                 int countCallbacks = 0;
                 ItemNode? node = Node.Parent ?? throw new InvalidOperationException($"Filter node '{Node.KeyPart}' has null parent");
@@ -351,11 +364,19 @@ namespace PSTT.Data
                             {
                                 if (fn.Matches(thisKey))
                                 {
-                                    countCallbacks++;
-                                    // fire it at wildcard subscriber...but with actual subsription as parameter
-                                    // we need to protect this somehow...make it readonly or a clone
-                                    var dummy = new SubscriptionCopy(Node.Sub);
-                                    _ = fn.Sub.InvokeCallback(dummy, cancellationToken);
+                                    var fnsub = fn.Sub;
+                                    if (fnsub == null)
+                                    {
+                                        Debug.WriteLine($"Filter node '{fn.KeyPart}' with filter '{string.Join('/', fn.Filter)}' has null subscription — item was removed concurrently, skipping.");
+                                    }
+                                    else
+                                    {
+                                        countCallbacks++;
+                                        // fire it at wildcard subscriber...but with actual subsription as parameter
+                                        // we need to protect this somehow...make it readonly or a clone
+                                        var dummy = new SubscriptionCopy(sub);
+                                        _ = fnsub.InvokeCallback(dummy, cancellationToken);
+                                    }
                                 }
                                 else
                                 {
@@ -369,7 +390,9 @@ namespace PSTT.Data
                 }
                 if (countCallbacks == 0)
                 {
-                    Debug.WriteLine($"No filter nodes matched key '{thisKey}'");
+                    // not very interesting...
+                    // a node updated and no parent in the tree had a wilcard request
+                    // Debug.WriteLine($"No filter nodes matched key '{thisKey}'");
                 }
             }
 
@@ -438,6 +461,8 @@ namespace PSTT.Data
 
             internal void OnRemove()
             {
+                // Mark removed first so any in-flight OnInvokeCallback tasks bail out immediately.
+                _removed = true;
                 Node.Sub = null!;
 
                 var rootNode = ((CacheWithWildcards<TKey, TValue>)Source).root;
@@ -456,7 +481,45 @@ namespace PSTT.Data
                     lock (rootNode)
                     {
                         if (itemNode.Children.Count == 0)
-                            itemNode.Parent?.Children.Remove(itemNode);
+                        {
+                            if (itemNode.Parent == null)
+                            {
+                                Debug.WriteLine("Unexpected itemNode with null parent?");
+                            }
+                            else
+                            {
+                                if (itemNode.Parent.Children.Remove(itemNode) == false)
+                                {
+                                    Debug.WriteLine("Unexpected failure to remove itemNode from parent?");
+                                }
+                                //
+                                // if parent is now empty and has no subscription then remove that too and so on up the tree?
+                                // - this is just a cleanup to stop the tree growing indefinitely with empty nodes if we have lots of churn but the same keys coming and going
+                                var parent = itemNode.Parent;
+                                while (parent != null
+                                    && object.ReferenceEquals(parent, rootNode) == false
+                                    && parent.Sub == null
+                                    && parent.Children.Count == 0
+                                    && parent.Filters.Count == 0)
+                                {
+                                    if (parent.Parent == null)
+                                    {
+                                        Debug.WriteLine("Unexpected parent with null parent?");
+                                        break;
+                                    }
+                                    else
+                                    {
+                                        var grandParent = parent.Parent;
+                                        if (grandParent.Children.Remove(parent) == false)
+                                        {
+                                            Debug.WriteLine("Unexpected failure to remove parent itemNode from grandparent?");
+                                            break;
+                                        }
+                                        parent = grandParent;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -491,7 +554,7 @@ namespace PSTT.Data
                         // remainder of parts array is now a filter
                         filter = parts[p..];
 
-                        var filterNode = node.Filters.Find(c => c.Equals(filter));
+                        var filterNode = node.Filters.Find(c => c is FilterNode fn && fn.Filter.SequenceEqual(filter));
                         if (filterNode != null)
                         {
                             // Concurrent GetOrAdd: another thread already added this wildcard key.

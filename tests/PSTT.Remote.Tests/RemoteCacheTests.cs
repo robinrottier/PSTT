@@ -391,8 +391,15 @@ namespace PSTT.Remote.Tests
             var sub1 = client1.Subscribe("persist/topic", async s => { recv1 = s.Value; });
 
             // Confirm both subscriptions are live on the server before disconnecting client1.
-            await _upstream.PublishAsync("persist/topic", "ready");
-            Assert.True(await WaitForAsync(() => recv1 == "ready" && recv2 == "ready"),
+            // Re-publish until both callbacks fire — the first publish may race ahead of
+            // subscription registration on the server in optimised (Release) builds.
+            var subDeadline = DateTime.UtcNow.AddSeconds(10);
+            while (DateTime.UtcNow < subDeadline && (recv1 != "ready" || recv2 != "ready"))
+            {
+                await _upstream.PublishAsync("persist/topic", "ready");
+                await Task.Delay(200);
+            }
+            Assert.True(recv1 == "ready" && recv2 == "ready",
                 "Subscriptions did not become active in time");
             recv2 = null;
 

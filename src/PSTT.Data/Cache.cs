@@ -479,12 +479,14 @@ namespace PSTT.Data
             }
         }
 
-        public ISubscription<TKey, TValue> Subscribe(TKey key, Func<ISubscription<TKey, TValue>, Task> callback)
+        // Shared setup for Subscribe and SubscribeAsync: reserves counts, gets/creates the item,
+        // attaches upstream, adds the subscription, and atomically captures NeedsInitialInvoke.
+        // Rolls back _subscribeCount on failure. Does NOT dispatch InitialInvokeAsync.
+        private (CacheItem<TKey, TValue> col, Subscription<TKey, TValue> sub, bool shouldInitialInvoke)
+            SubscribeCore(TKey key, Func<ISubscription<TKey, TValue>, Task> callback)
         {
-            // validate key
             if (key is null) throw new ArgumentNullException(nameof(key));
 
-            // Increment subscription count first to reserve a slot
             var count = Interlocked.Increment(ref _subscribeCount);
             if (MaxSubscriptionsTotal > 0 && count > MaxSubscriptionsTotal)
             {
@@ -494,10 +496,8 @@ namespace PSTT.Data
 
             try
             {
-                // already in collection or new one
                 var col = _cache.GetOrAdd(key, k =>
                 {
-                    // enforce MaxTopics when a new topic is being created
                     var newTopicCount = Interlocked.Increment(ref _topicCount);
                     if (MaxTopics > 0 && newTopicCount > MaxTopics)
                     {
@@ -517,9 +517,7 @@ namespace PSTT.Data
                 lock (col)
                 {
                     if (col.Count >= MaxSubscriptionsPerTopic && MaxSubscriptionsPerTopic > 0)
-                    {
                         throw new InvalidOperationException("Subscription count per topic exceeded");
-                    }
 
                     sub = col.Add(callback);
                     // Capture the status atomically with the subscription add. If there is already
@@ -528,22 +526,28 @@ namespace PSTT.Data
                     shouldInitialInvoke = col.NeedsInitialInvoke;
                 }
 
-                if (shouldInitialInvoke)
-                {
-                    if (WaitOnSubscriptionCallback)
-                        col.InitialInvokeAsync(sub).Wait();
-                    else
-                        _ = col.InitialInvokeAsync(sub);
-                }
-
-                return sub;
+                return (col, sub, shouldInitialInvoke);
             }
             catch
             {
-                // If we failed to add the subscription, decrement the count
                 Interlocked.Decrement(ref _subscribeCount);
                 throw;
             }
+        }
+
+        public ISubscription<TKey, TValue> Subscribe(TKey key, Func<ISubscription<TKey, TValue>, Task> callback)
+        {
+            var (col, sub, shouldInitialInvoke) = SubscribeCore(key, callback);
+
+            if (shouldInitialInvoke)
+            {
+                if (WaitOnSubscriptionCallback)
+                    col.InitialInvokeAsync(sub).Wait();
+                else
+                    _ = col.InitialInvokeAsync(sub);
+            }
+
+            return sub;
         }
 
         public void Unsubscribe(ISubscription<TKey, TValue> subscription)
@@ -579,8 +583,7 @@ namespace PSTT.Data
         {
             var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            ISubscription<TKey, TValue>? sub = null;
-            sub = Subscribe(key, async s =>
+            var (col, sub, shouldInitialInvoke) = SubscribeCore(key, async s =>
             {
                 // Forward every callback to the caller's handler.
                 await callback(s);
@@ -589,6 +592,11 @@ namespace PSTT.Data
                 if (!s.Status.IsPending)
                     tcs.TrySetResult(true);
             });
+
+            // Dispatch the initial callback fire-and-forget; the TCS is the authoritative
+            // signal for "first real value delivered" — not the completion of InitialInvokeAsync.
+            if (shouldInitialInvoke)
+                _ = col.InitialInvokeAsync(sub);
 
             // If cancellation is requested, cancel the wait but keep the subscription alive.
             using (cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken)))

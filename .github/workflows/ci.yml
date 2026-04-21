@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  # ── Build & test in both Debug and Release ────────────────────────────────
+  test:
+    name: Test (${{ matrix.configuration }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore PSTT.slnx
+
+      - name: Build
+        run: dotnet build PSTT.slnx -c ${{ matrix.configuration }} --no-restore
+
+      - name: Test
+        run: >
+          dotnet test PSTT.slnx
+          -c ${{ matrix.configuration }}
+          --no-build
+          --logger "trx;LogFileName=results.trx"
+          --results-directory TestResults/${{ matrix.configuration }}
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.configuration }}
+          path: TestResults/${{ matrix.configuration }}/**/*.trx
+
+  # ── Code coverage (Debug build) ───────────────────────────────────────────
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore PSTT.slnx
+
+      - name: Build
+        run: dotnet build PSTT.slnx -c Debug --no-restore
+
+      - name: Test with coverage
+        run: >
+          dotnet test PSTT.slnx
+          -c Debug
+          --no-build
+          --collect:"XPlat Code Coverage"
+          --results-directory coverage/raw
+
+      - name: Install ReportGenerator
+        run: dotnet tool install -g dotnet-reportgenerator-globaltool
+
+      - name: Generate coverage report
+        run: >
+          reportgenerator
+          -reports:"coverage/raw/**/coverage.cobertura.xml"
+          -targetdir:"coverage/report"
+          -reporttypes:"HtmlInline_AzurePipelines;Cobertura;MarkdownSummaryGithub"
+          -assemblyfilters:"+PSTT.*"
+
+      - name: Write coverage summary to job
+        run: cat coverage/report/SummaryGithub.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/report

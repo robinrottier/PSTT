@@ -127,15 +127,16 @@ namespace PSTT.Mqtt
 
         internal override CacheItem<string, TValue> NewItem(string key)
         {
-            var col = base.NewItem(key);
-            // Only subscribe at the broker when triggered by a user Subscribe() call.
-            // When _incomingMessageDepth > 0 the cache entry is being created as a side-effect of
-            // routing an arriving broker message — we already receive this topic via the existing
-            // wildcard (e.g. '#') subscription, so adding an exact subscription would cause the broker
-            // to re-deliver any retained message and produce a duplicate callback.
-            if (_incomingMessageDepth == 0)
-                _ = SubscribeBrokerTopicAsync(key);
-            return col;
+            return base.NewItem(key);
+        }
+
+        // AttachUpstream is called by Cache.Subscribe — only when a local subscriber is attached.
+        // This is the correct place to create the broker subscription: never fires on PublishAsync,
+        // and handles the case where the item was pre-created by a PublishAsync before Subscribe.
+        internal override void AttachUpstream(CacheItem<string, TValue> col)
+        {
+            base.AttachUpstream(col);
+            _ = SubscribeBrokerTopicAsync(col.Key);
         }
 
         internal override void RemoveItem(CacheItem<string, TValue> col)

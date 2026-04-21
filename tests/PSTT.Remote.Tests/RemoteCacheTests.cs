@@ -386,10 +386,15 @@ namespace PSTT.Remote.Tests
             await client1.ConnectAsync();
             await client2.ConnectAsync();
 
-            string? recv2 = null;
+            string? recv1 = null, recv2 = null;
             var sub2 = client2.Subscribe("persist/topic", async s => { recv2 = s.Value; });
-            var sub1 = client1.Subscribe("persist/topic", async s => { });
-            await Task.Delay(150);
+            var sub1 = client1.Subscribe("persist/topic", async s => { recv1 = s.Value; });
+
+            // Confirm both subscriptions are live on the server before disconnecting client1.
+            await _upstream.PublishAsync("persist/topic", "ready");
+            Assert.True(await WaitForAsync(() => recv1 == "ready" && recv2 == "ready"),
+                "Subscriptions did not become active in time");
+            recv2 = null;
 
             // Disconnect client1 and wait for the server to process the disconnect
             await client1.DisconnectAsync();

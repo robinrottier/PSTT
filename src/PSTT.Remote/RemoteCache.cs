@@ -98,10 +98,14 @@ namespace PSTT.Remote
 
         internal override CacheItem<string, TValue> NewItem(string key)
         {
-            var col = base.NewItem(key);
-            if (_incomingMessageDepth == 0)
-                _ = SubscribeServerTopicAsync(key);
-            return col;
+            return base.NewItem(key);
+        }
+
+        // AttachUpstream is called by Cache.Subscribe — only when a local subscriber is attached.
+        internal override void AttachUpstream(CacheItem<string, TValue> col)
+        {
+            base.AttachUpstream(col);
+            _ = SubscribeServerTopicAsync(col.Key);
         }
 
         internal override void RemoveItem(CacheItem<string, TValue> col)

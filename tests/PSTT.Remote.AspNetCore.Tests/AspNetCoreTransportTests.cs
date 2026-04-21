@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using System.Text;
 
 namespace PSTT.Remote.AspNetCore.Tests
@@ -49,6 +50,7 @@ namespace PSTT.Remote.AspNetCore.Tests
         {
             var upstream = new CacheWithWildcards<string, string>();
             var builder = WebApplication.CreateBuilder();
+            builder.Logging.ClearProviders();
             builder.WebHost.UseTestServer();
 
             builder.Services.AddCacheSignalRServer<string>(
@@ -238,6 +240,7 @@ namespace PSTT.Remote.AspNetCore.Tests
         {
             var upstream = new CacheWithWildcards<string, string>();
             var builder = WebApplication.CreateBuilder();
+            builder.Logging.ClearProviders();
             builder.WebHost.UseTestServer();
 
             builder.Services.AddCacheWebSocketServer<string>(

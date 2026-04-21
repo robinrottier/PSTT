@@ -263,7 +263,7 @@ namespace PSTT.Data.Tests
             var ds = new Cache<string, string>();
             var received = new List<string?>();
 
-            _ = Task.Run(async () =>
+            var t = Task.Run(async () =>
             {
                 await Task.Delay(20);
                 await ds.PublishAsync("k", "first");
@@ -271,13 +271,16 @@ namespace PSTT.Data.Tests
                 await ds.PublishAsync("k", "second");
             });
 
-            var sub = await ds.SubscribeAsync("k", async s => { received.Add(s.Value); });
+            var sub = await ds.SubscribeAsync("k", async s => { lock(received) { received.Add(s.Value); } });
 
             // Let the second publish fire
             await Task.Delay(100);
+            await t; // ensure publish task has completed
+            await TestHelper.WaitForValue(0, () => ds.ActiveCallbacks); // ensure all callbacks have completed
 
             // callback was invoked for both publishes
             Assert.Contains("first", received);
+            Assert.Contains("second", received);
         }
 
         [Fact]

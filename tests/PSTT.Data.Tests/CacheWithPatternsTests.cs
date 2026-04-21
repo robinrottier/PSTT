@@ -820,12 +820,13 @@ namespace PSTT.Data.Tests
             counts = ds.GetCounts();
             // leaf2 removed but branch1 stays (parent nodes are kept even without children or subscriptions)
             // Remaining: RootNode + root + branch1 + branch2 + leaf1_under_branch2
-            Assert.Equal(5, counts.ItemCount);
+            // = childless branchess now cleaned up ==> RootNode+root+branch2+leaf1_under_branch2
+            Assert.Equal(4, counts.ItemCount);
 
             ds.Unsubscribe(sub3);
             counts = ds.GetCounts();
-            // leaf1 removed, parent nodes remain: RootNode + root + branch1 + branch2
-            Assert.Equal(4, counts.ItemCount);
+            // leaf1 removed, nothing left except RootNode
+            Assert.Equal(1, counts.ItemCount);
         }
 
         [Fact]

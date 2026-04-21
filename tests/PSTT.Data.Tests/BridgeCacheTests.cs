@@ -296,5 +296,57 @@ namespace PSTT.Data.Tests
             Assert.Equal(IStatus.StateValue.Pending, lastState);
             sub.Dispose();
         }
+
+
+        // ─── Bigger chain of caches ───────────────────────────────────────────────
+
+        [Fact]
+        public async Task ChainedCacheOffBridge()
+        {
+            var (top, _, data, bridge) = CreateChain();
+
+            // add another cahce onto the chain
+            var end = new CacheBuilder<string, string>().WithWildcards().WithSynchronousCallbacks()
+                .WithUpstream(bridge, supportsWildcards: true).Build();
+
+            bridge.SetBridges(["ess1/servers/#"]);
+
+            string? received = null;
+            bridge.Subscribe("ess1/servers/pv/power", async s => { received = s.Value; });
+
+            string? endReceived = null;
+            end.Subscribe("ess1/servers/pv/power", async s => { endReceived = s.Value; });
+
+            string? endReceivedW = null;
+            end.Subscribe("ess1/#", async s => { endReceivedW = s.Value; });
+
+            string? dataReceivedW = null;
+            data.Subscribe("ess1/#", async s => { dataReceivedW = s.Value; });
+
+            await top.PublishAsync("ess1/servers/pv/power", "1200");
+
+            Assert.True(await TestHelper.WaitForValue("1200", () => received),
+                "Expected value to flow from topCache through bridge into local subscription");
+
+            Assert.True(await TestHelper.WaitForValue("1200", () => endReceived),
+                "Expected value to flow from topCache through bridge into end cache subscription");
+
+            Assert.True(await TestHelper.WaitForValue("1200", () => endReceivedW),
+                "Expected value to flow from topCache through bridge into end cache wildcard subscription");
+
+            Assert.True(await TestHelper.WaitForValue("1200", () => dataReceivedW),
+                "Expected value to flow from topCache through bridge into data cache wildcard subscription");
+
+            // now publish a new value that matches the wildcards....
+            await top.PublishAsync("ess1/servers2/pv/power", "2345");
+
+            // middle cache gets it
+            Assert.True(await TestHelper.WaitForValue("2345", () => dataReceivedW),
+                "Expected value to flow from topCache through bridge into data cache wildcard subscription");
+
+            // and end cache doesnt
+            Assert.False(await TestHelper.WaitForValue("2345", () => endReceivedW, 2));
+
+        }
     }
 }

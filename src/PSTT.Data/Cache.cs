@@ -633,20 +633,28 @@ namespace PSTT.Data
             DebugAssert(ReferenceEquals(v, col), "Removed subscription does not match expected");
         }
 
+        /// <summary>
+        /// Returns <c>true</c> if a publish for <paramref name="key"/> should be forwarded to the
+        /// upstream cache when <see cref="ForwardPublishToUpstream"/> is set. Override to suppress
+        /// forwarding for specific key namespaces (e.g. internal virtual topics that must not reach
+        /// an upstream broker).
+        /// </summary>
+        protected virtual bool ShouldForwardPublish(TKey key) => true;
+
         public virtual async Task PublishAsync(TKey key, TValue value, IStatus? status, bool retain = false, CancellationToken cancellationToken = default)
         {
             var subs = _cache.GetOrAdd(key, k => NewItem(k));
             subs.Retain = retain;
             await subs.PublishAsync(value, status, cancellationToken);
             HandleFailStatus(subs);
-            if (ForwardPublishToUpstream && Upstream != null)
+            if (ForwardPublishToUpstream && Upstream != null && ShouldForwardPublish(key))
                 await Upstream.PublishAsync(key, value, status, retain, cancellationToken);
         }
         public virtual async Task PublishAsync(TKey key, TValue value, CancellationToken cancellationToken = default)
         {
             var subs = _cache.GetOrAdd(key, k => NewItem(k));
             await subs.PublishAsync(value, cancellationToken);
-            if (ForwardPublishToUpstream && Upstream != null)
+            if (ForwardPublishToUpstream && Upstream != null && ShouldForwardPublish(key))
                 await Upstream.PublishAsync(key, value, cancellationToken);
         }
         public virtual async Task PublishAsync(TKey key, IStatus status, CancellationToken cancellationToken = default)

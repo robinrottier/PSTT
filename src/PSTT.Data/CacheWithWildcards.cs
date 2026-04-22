@@ -283,15 +283,19 @@ namespace PSTT.Data
                         lock (_upstreamCacheLock) { _upstreamCache[sub.Key] = (sub.Value, sub.Status); }
                     await InvokeCallback(sub);
                 }
+                else if (Source.UpstreamSupportsWildcards)
+                {
+                    // supportsWildcards: true — wildcard subscribers (e.g. '#') each have their own
+                    // upstream subscription (Path B) that delivers this value independently.
+                    // Suppress the OnInvokeCallback tree walk (Path A) to avoid double-delivery:
+                    // the '#' subscriber will receive the value via its own upstream callback.
+                    await PublishFromUpstreamAsync(sub.Value, sub.Status);
+                }
                 else
                 {
-                    // Use PublishFromUpstreamAsync instead of PublishAsync to suppress the
-                    // OnInvokeCallback tree walk. Any wildcard subscribers above this item in the
-                    // tree (e.g. '#') have their own upstream subscriptions and will receive this
-                    // value independently via the _isWildcard=true branch above (Path B).
-                    // Allowing the tree walk (Path A) would cause duplicate delivery for every
-                    // upstream publish when both an exact-key sub and a '#' sub exist.
-                    await PublishFromUpstreamAsync(sub.Value, sub.Status);
+                    // supportsWildcards: false — wildcard subscribers have NO upstream subscription.
+                    // Path A (tree walk in OnInvokeCallback) is the only delivery mechanism for them.
+                    await PublishAsync(sub.Value, sub.Status);
                 }
             }
 

@@ -34,6 +34,15 @@ namespace PSTT.Data
         private readonly ICache<TKey, TValue> _source;
         private readonly CacheWithWildcards<TKey, TValue> _local;
         private readonly List<ISubscription<TKey, TValue>> _bridges = [];
+        private HashSet<TKey>? _currentPatterns;
+        private int _bridgeGeneration = 0;
+
+        /// <summary>
+        /// Incremented each time <see cref="SetBridges"/> actually changes the bridge patterns
+        /// (i.e. is not a no-op). Consumers can include this in subscription keys to detect
+        /// when the scope has changed and re-subscribe.
+        /// </summary>
+        public int BridgeGeneration => _bridgeGeneration;
 
         /// <summary>The upstream source cache (publishes reach this and propagate to broker).</summary>
         public ICache<TKey, TValue> Source => _source;
@@ -51,17 +60,26 @@ namespace PSTT.Data
         }
 
         /// <summary>
-        /// Configures the bridge patterns. Disposes any existing bridges, clears the local cache,
-        /// then subscribes to each <paramref name="patterns"/> on <see cref="Source"/>. Matching
-        /// data is forwarded (retained) into <see cref="Local"/>.
+        /// Configures the bridge patterns. If <paramref name="patterns"/> is identical to the
+        /// current set this call is a no-op (subscriptions and local cache are untouched).
+        /// When patterns change, existing bridges are disposed, the local cache is cleared, new
+        /// bridge subscriptions are created on <see cref="Source"/>, and
+        /// <see cref="BridgeGeneration"/> is incremented so that consumers can detect the scope
+        /// change and re-subscribe.
         /// </summary>
         public void SetBridges(IEnumerable<TKey> patterns)
         {
+            var patternList = patterns.ToList();
+            if (_currentPatterns != null && _currentPatterns.SetEquals(patternList))
+                return; // no-op: patterns unchanged — keep subscriptions alive
+
             foreach (var sub in _bridges) sub.Dispose();
             _bridges.Clear();
             _local.Clear();
+            _currentPatterns = new HashSet<TKey>(patternList);
+            _bridgeGeneration++;
 
-            foreach (var pattern in patterns)
+            foreach (var pattern in patternList)
             {
                 var sub = _source.Subscribe(pattern, async s =>
                 {
@@ -99,6 +117,8 @@ namespace PSTT.Data
             foreach (var sub in _bridges) sub.Dispose();
             _bridges.Clear();
             _local.Clear();
+            _currentPatterns = null;
+            _bridgeGeneration++;
         }
 
         // ── Publish / register → _source (global) ─────────────────────────────────

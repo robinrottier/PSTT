@@ -392,7 +392,7 @@ namespace PSTT.Data
                                 else
                                 {
                                     // not a match so do nothing
-                                    Debug.WriteLine($"Filter node '{fn.KeyPart}' with filter '{string.Join('/', fn.Filter)}' does not match key '{thisKey}'");
+                                    // Debug.WriteLine($"Filter node '{fn.KeyPart}' with filter '{string.Join('/', fn.Filter)}' does not match key '{thisKey}'");
                                 }
                             }
                         }

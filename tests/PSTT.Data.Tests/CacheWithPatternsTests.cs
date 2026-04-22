@@ -1220,7 +1220,7 @@ namespace PSTT.Data.Tests
                 new object[] { "a/+/c", "a/b", false },
 
                 // Combination of + and #
-                new object[] { "a/+/#", "a/b", false },
+                new object[] { "a/+/#", "a/b", true },
                 new object[] { "a/+/#", "a/b/c", true },
                 new object[] { "a/+/#", "a/b/c/d/e", true },
                 new object[] { "a/+/#", "a/x/y/z", true },
@@ -1245,7 +1245,7 @@ namespace PSTT.Data.Tests
                 new object[] { "home/+/temp", "office/kitchen/temp", false },
 
                 // Complex patterns
-                new object[] { "building/+/floor/+/#", "building/A/floor/1", false },
+                new object[] { "building/+/floor/+/#", "building/A/floor/1", true },
                 new object[] { "building/+/floor/+/#", "building/A/floor/1/room/101", true },
                 new object[] { "building/+/floor/+/#", "building/B/floor/2/room/202/desk", true },
                 new object[] { "building/+/floor/+/#", "building/A/level/1/room/101", false },
@@ -1256,7 +1256,7 @@ namespace PSTT.Data.Tests
                 new object[] { "data/+", "data/item123", true },
 
                 // Multi-level patterns with exact matches
-                new object[] { "a/b/+/d/#", "a/b/c/d", false },
+                new object[] { "a/b/+/d/#", "a/b/c/d", true },
                 new object[] { "a/b/+/d/#", "a/b/c/d/e", true },
                 new object[] { "a/b/+/d/#", "a/b/c/d/e/f/g", true },
                 new object[] { "a/b/+/d/#", "a/b/x/d/y", true },

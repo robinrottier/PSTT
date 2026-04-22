@@ -92,99 +92,104 @@ namespace PSTT.Data
 
         internal class FilterNode : TreeNode
         {
-            public FilterNode(TKey key, ItemNode parent, string[] filter) : base(key, parent)
+            private readonly IWildcardMatcher<TKey>? _matcher;
+
+            /// <summary>
+            /// The full subscription pattern string, e.g. "#", "sensors/#", "sensors/+/temp", "$DASHBOARD/#".
+            /// Used to delegate matching to the configured <see cref="IWildcardMatcher{TKey}"/>.
+            /// </summary>
+            public string FullPattern { get; init; }
+
+            public FilterNode(TKey key, ItemNode parent, string[] filter, IWildcardMatcher<TKey>? matcher = null) : base(key, parent)
             {
-                // first item of filter array shoul dbe the wildcard...the code before this point should have stripped
-                // all leadin matching parts of the filter and then created a filter node with the remaining filter parts
                 if (filter == null) throw new ArgumentNullException(nameof(filter));
                 if (filter.Length == 0) throw new ArgumentException("Filter array must have at least one part", nameof(filter));
-                if (filter[0] != "#" && filter[0] != "+") throw new ArgumentException("First part of filter array must be a wildcard (# or +)", nameof(filter));
 
+                // Validate that the first filter part is a wildcard token using the configured matcher
+                // when available, falling back to MQTT-specific check for null matcher / non-string TKey.
+                bool firstPartIsWildcard = (matcher != null && filter[0] is TKey key0)
+                    ? matcher.IsPattern(key0)
+                    : (filter[0] == "#" || filter[0] == "+");
+                if (!firstPartIsWildcard)
+                    throw new ArgumentException("First part of filter array must be a wildcard (# or +)", nameof(filter));
+
+                _matcher = matcher;
                 Filter = filter;
+                FullPattern = parent.Path.Length == 0
+                    ? string.Join("/", filter)
+                    : parent.Path + "/" + string.Join("/", filter);
             }
 
+            // Test-only constructor — no matcher, uses fallback matching logic.
             internal FilterNode(TKey key, string path, string[] filter) : base(key, path)
             {
                 Filter = filter;
+                _matcher = null;
+                FullPattern = (path?.Length ?? 0) == 0
+                    ? string.Join("/", filter)
+                    : path + "/" + string.Join("/", filter);
             }
 
             public string[] Filter { get; init; }
+
             public bool Matches(string? other)
             {
                 if (other == null) throw new ArgumentNullException(nameof(other));
 
-                // path is up to parent e.g. "topic1/topic2"
+                // Delegate to the configured matcher when available.
+                // FullPattern holds the full subscription pattern (e.g. "#", "sensors/+/temp", "$DASHBOARD/#").
+                // All wildcard semantics — including MQTT §4.7.2 '$' exclusion — are handled by the matcher.
+                if (_matcher != null && FullPattern is TKey patternKey && other is TKey candidateKey)
+                    return _matcher.Matches(patternKey, candidateKey);
+
+                // Fallback: built-in MQTT-style matching for null matcher or non-string TKey.
                 string path = Parent?.Path!;
                 if (path == null) throw new InvalidOperationException($"Filter node '{KeyPart}' has null parent key");
 
-                // if path is "" then we're one level from the root
-                // - so either an exact match or single wildcard...
                 if (path.Length == 0)
                 {
-                    // MQTT 3.1.1 §4.7.2: wildcards at the root level must not match topics
-                    // whose first segment begins with '$'. Explicit patterns like $DASHBOARD/#
-                    // have a non-empty path so they are unaffected by this rule.
+                    // MQTT 3.1.1 §4.7.2: wildcards at the root level must not match $-prefixed topics.
                     if (other.StartsWith('$'))
                         return false;
 
-                    // # at root just matches everything
                     if (Filter.Length == 1 && Filter[0] == "#")
                         return true;
-                    // + at root just matches single level so only matches if other has no "/" in it
                     if (Filter.Length == 1 && Filter[0] == "+")
-                    {
                         return !other.Contains("/");
-                    }
-                    // just double check--filter MUST be + something if we're here
                     if (Filter[0] != "+")
                         throw new InvalidOperationException($"Filter node '{KeyPart}' has invalid filter part '{Filter[0]}' - first part of filter array must be a wildcard +");
-
-                    // if we have more than one filter part then we need to check the rest of the filter against the other string
                 }
                 else
                 {
-                    // so if other doesnt start with that and "/" then not a macth
                     if (!other.StartsWith(path) || (other.Length > path.Length && other[path.Length] != '/'))
                         return false;
 
-                    // if other is exactly the same as path then only a match if filter is "#" or "+" and has no more parts
-                    if (other.Length == path.Length)// length match as already checked "StartsWith"
-                    {
+                    if (other.Length == path.Length)
                         return Filter.Length == 1 && (Filter[0] == "#" || Filter[0] == "+");
-                    }
 
-                    // get rest of topic after parent/
                     other = other[(path.Length + 1)..];
                 }
 
-                // and split into parts
-                // TODO: we ought to be able to just move along the other string and not have to split it
                 string[] othera = other.Split('/');
-                // and compare to filter parts
-                for (int i=0; i<Filter.Length; i++)
+                for (int i = 0; i < Filter.Length; i++)
                 {
                     var filterPart = Filter[i];
                     if (filterPart == "#")
                     {
-                        // matches anything remaining -- but must match something
-                        // -- if run out of othera then fail (e.g. "a/#" does not match "a")
                         if (i >= othera.Length)
                             return false;
                         return true;
                     }
                     else if (filterPart == "+")
                     {
-                        // matches any single part so just continue
+                        // matches any single part — continue
                     }
                     else
                     {
-                        // must match exactly
                         if (i >= othera.Length || filterPart != othera[i])
                             return false;
                     }
                 }
-                // still here so all filter parts matched
-                // -- but if we have more other parts then only a match if last filter part was "#"
                 if (othera.Length > Filter.Length)
                     return Filter.Length > 0 && Filter[^1] == "#";
                 return true;
@@ -568,7 +573,7 @@ namespace PSTT.Data
                             lastNode = filterNode;
                             break;
                         }
-                        filterNode = new FilterNode(key1, node, filter);
+                        filterNode = new FilterNode(key1, node, filter, _matcher);
                         node.Filters.Add(filterNode);
                         lastNode = filterNode;
                         break;

@@ -43,6 +43,18 @@ namespace PSTT.Data.Tests
         [InlineData("a/#", "a", true)]
         [InlineData("a/#", "a/b", true)]
         [InlineData("a/#", "b", false)]
+        // MQTT 3.1.1 §4.7.2 — # and + at first level must NOT match $-prefixed topics
+        [InlineData("#", "$DASHBOARD/TIME", false)]
+        [InlineData("#", "$SYS/uptime", false)]
+        [InlineData("#", "$", false)]               // bare $ prefix
+        [InlineData("+/b", "$topic/b", false)]      // + at first level, $-prefixed candidate
+        // but explicit $-prefix patterns still work
+        [InlineData("$DASHBOARD/#", "$DASHBOARD/TIME", true)]
+        [InlineData("$DASHBOARD/#", "$DASHBOARD/nested/value", true)]
+        [InlineData("$DASHBOARD/TIME", "$DASHBOARD/TIME", true)]
+        // non-first-level wildcards with $-prefix patterns work normally
+        [InlineData("$DASHBOARD/+", "$DASHBOARD/TIME", true)]
+        [InlineData("$DASHBOARD/+", "$DASHBOARD/nested/value", false)] // + is single-level
         public void MqttPatternMatcher_Matches(string pattern, string candidate, bool expected)
         {
             var matcher = new MqttWildcardMatcher();

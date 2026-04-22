@@ -224,6 +224,12 @@ namespace PSTT.Mqtt
             if (_serializer == null || !_connected)
                 return;
 
+            // Per MQTT convention, topics beginning with '$' are reserved for broker-internal use
+            // (e.g. $SYS/#). Clients must not publish to them; doing so is undefined behaviour.
+            // Virtual topics such as $DASHBOARD/* are local-only and must never reach the broker.
+            if (key.StartsWith('$'))
+                return;
+
             var payload = _serializer(value);
             var message = new MqttApplicationMessageBuilder()
                 .WithTopic(key)

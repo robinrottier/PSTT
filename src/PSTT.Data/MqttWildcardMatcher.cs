@@ -12,7 +12,8 @@ namespace PSTT.Data
     /// <list type="bullet">
     ///   <item><description><c>sensors/+/temp</c> matches <c>sensors/living/temp</c> but not <c>sensors/living/room/temp</c>.</description></item>
     ///   <item><description><c>sensors/#</c> matches any topic starting with <c>sensors/</c> (and the parent <c>sensors</c> itself).</description></item>
-    ///   <item><description><c>#</c> matches every topic.</description></item>
+    ///   <item><description><c>#</c> matches every topic <em>except</em> topics beginning with <c>$</c> (per §4.7.2).</description></item>
+    ///   <item><description>Wildcards (<c>#</c> or <c>+</c>) in the first filter segment do NOT match topics whose first segment begins with <c>$</c> (MQTT 3.1.1 §4.7.2). Use explicit <c>$prefix/#</c> patterns to subscribe to such topics.</description></item>
     /// </list>
     /// </remarks>
     public sealed class MqttWildcardMatcher : IWildcardMatcher<string>
@@ -33,6 +34,13 @@ namespace PSTT.Data
 
             string[] patternParts = pattern.Split('/');
             string[] candidateParts = candidate.Split('/');
+
+            // MQTT 3.1.1 §4.7.2: wildcards in the first filter segment must NOT match topics
+            // whose first segment begins with '$'. Use an explicit prefix (e.g. "$DASHBOARD/#")
+            // to subscribe to such topics.
+            if (candidateParts[0].StartsWith('$') &&
+                (patternParts[0] == "#" || patternParts[0] == "+"))
+                return false;
 
             for (int i = 0; i < patternParts.Length; i++)
             {

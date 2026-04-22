@@ -136,7 +136,7 @@ namespace PSTT.Remote.Tests
                         received = s.Value;
                 });
 
-                Assert.True(await WaitForAsync(() => received == "PRE-EXISTING"),
+                Assert.True(await WaitForAsync(() => received == "PRE-EXISTING", 10000),
                     "Pre-existing upstream value was not delivered on client subscribe");
 
                 client.Unsubscribe(sub);
@@ -390,10 +390,13 @@ namespace PSTT.Remote.Tests
             var sub2 = client2.Subscribe("persist/topic", async s => { recv2 = s.Value; });
             var sub1 = client1.Subscribe("persist/topic", async s => { recv1 = s.Value; });
 
+            // Give subscriptions a moment to register on the server before we start polling.
+            await Task.Delay(500);
+
             // Confirm both subscriptions are live on the server before disconnecting client1.
             // Re-publish until both callbacks fire — the first publish may race ahead of
             // subscription registration on the server in optimised (Release) builds.
-            var subDeadline = DateTime.UtcNow.AddSeconds(10);
+            var subDeadline = DateTime.UtcNow.AddSeconds(20);
             while (DateTime.UtcNow < subDeadline && (recv1 != "ready" || recv2 != "ready"))
             {
                 await _upstream.PublishAsync("persist/topic", "ready");

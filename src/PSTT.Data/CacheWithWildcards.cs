@@ -285,7 +285,13 @@ namespace PSTT.Data
                 }
                 else
                 {
-                    await PublishAsync(sub.Value, sub.Status);
+                    // Use PublishFromUpstreamAsync instead of PublishAsync to suppress the
+                    // OnInvokeCallback tree walk. Any wildcard subscribers above this item in the
+                    // tree (e.g. '#') have their own upstream subscriptions and will receive this
+                    // value independently via the _isWildcard=true branch above (Path B).
+                    // Allowing the tree walk (Path A) would cause duplicate delivery for every
+                    // upstream publish when both an exact-key sub and a '#' sub exist.
+                    await PublishFromUpstreamAsync(sub.Value, sub.Status);
                 }
             }
 
@@ -418,43 +424,54 @@ namespace PSTT.Data
                 }
                 else if (Node is FilterNode filterNode)
                 {
-                    // if its a wildcard node we need to fire all the current matches below this node in the tree
-                    // get all child items -- ignore filters as we're looking for actual values
-
-                    ItemNode parent = Node.Parent ?? throw new InvalidOperationException($"Filter node '{Node.KeyPart}' has null parent");
-                    var stack = new Stack<ItemNode>();
-                    stack.Push(parent);
-                    while (stack.Count > 0)
+                    if (UpstreamSub == null)
                     {
-                        // for each node from parent downwards...
-                        // - if it has a value
-                        var node = stack.Pop();
-                        if (node.Sub != null && !node.Sub.Status.IsPending)
+                        // No upstream sub — deliver values from the local item tree.
+                        // This covers local-only caches (no upstream) or supportsWildcards: false.
+                        ItemNode parent = Node.Parent ?? throw new InvalidOperationException($"Filter node '{Node.KeyPart}' has null parent");
+                        var stack = new Stack<ItemNode>();
+                        stack.Push(parent);
+                        while (stack.Count > 0)
                         {
-                            if (filterNode.Matches(node.Sub.Key.ToString()))
+                            // for each node from parent downwards...
+                            // - if it has a value
+                            var node = stack.Pop();
+                            if (node.Sub != null && !node.Sub.Status.IsPending)
                             {
-                                // fire it at wildcard subscriber...but with actual subsription as parameter
-                                // we need to protect this somehow...make it readonly or a clone
-                                var dummy = new SubscriptionCopy(node.Sub);
-                                _ = sub.InvokeCallback(dummy, cancellationToken);
+                                if (filterNode.Matches(node.Sub.Key.ToString()))
+                                {
+                                    // fire it at wildcard subscriber...but with actual subsription as parameter
+                                    // we need to protect this somehow...make it readonly or a clone
+                                    var dummy = new SubscriptionCopy(node.Sub);
+                                    _ = sub.InvokeCallback(dummy, cancellationToken);
+                                }
                             }
-                        }
-                        if (node is ItemNode itemNode)
-                        {
-                            List<ItemNode> childrenSnapshot;
-                            lock (((CacheWithWildcards<TKey, TValue>)Source).root)
+                            if (node is ItemNode itemNode)
                             {
-                                childrenSnapshot = itemNode.Children.ToList();
+                                List<ItemNode> childrenSnapshot;
+                                lock (((CacheWithWildcards<TKey, TValue>)Source).root)
+                                {
+                                    childrenSnapshot = itemNode.Children.ToList();
+                                }
+                                foreach (var child in childrenSnapshot)
+                                    stack.Push(child);
                             }
-                            foreach (var child in childrenSnapshot)
-                                stack.Push(child);
                         }
                     }
-
-                    // For wildcard upstream subscriptions: replay any upstream values that arrived
-                    // before this subscriber was registered (upstream fires before col.Add completes).
-                    if (UpstreamSub != null)
+                    else
                     {
+                        // Upstream sub exists (supportsWildcards: true).
+                        // Do NOT walk the local item tree. The upstream's own InitialInvokeAsync
+                        // fires UpstreamCallbackWildcards for every existing upstream value and
+                        // those callbacks reach this subscriber via one of two paths:
+                        //   - Callbacks that arrived before this subscriber was registered populated
+                        //     _upstreamCache; we replay those below.
+                        //   - Callbacks that arrive after this subscriber is registered deliver
+                        //     directly through InvokeCallback — no replay needed.
+                        // Walking the tree as well would duplicate every delivery from the first path.
+                        // Note: locally-published values that were not forwarded to upstream and did
+                        // not arrive via an upstream callback will not be replayed. This is an
+                        // accepted trade-off for a cache backed by a wildcard-capable upstream.
                         Dictionary<TKey, (TValue value, IStatus status)> snapshot;
                         lock (_upstreamCacheLock) { snapshot = new Dictionary<TKey, (TValue, IStatus)>(_upstreamCache); }
 

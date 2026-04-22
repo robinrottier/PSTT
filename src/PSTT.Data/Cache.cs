@@ -268,6 +268,18 @@ namespace PSTT.Data
         }
 
         protected async Task InvokeCallback(ISubscription<TKey, TValue>? subscription = null, CancellationToken cancellationToken = default)
+            => await InvokeCallback(subscription, fireTreeWalk: true, cancellationToken);
+
+        /// <summary>
+        /// Fires all active subscriber callbacks, then optionally calls
+        /// <see cref="OnInvokeCallback"/> for the tree-walk that delivers to wildcard
+        /// subscribers above this item in the key hierarchy.
+        /// Pass <paramref name="fireTreeWalk"/>=<c>false</c> when an upstream callback
+        /// is the origin of this update: wildcard subscribers have their own independent
+        /// upstream subscriptions that already deliver the value (Path B), so walking the
+        /// tree (Path A) would cause them to receive a duplicate delivery.
+        /// </summary>
+        protected async Task InvokeCallback(ISubscription<TKey, TValue>? subscription, bool fireTreeWalk, CancellationToken cancellationToken = default)
         {
             await Parallel.ForEachAsync(Subscriptions.Where(s => s.IsActive), cancellationToken, async (sub, ct) =>
             {
@@ -278,7 +290,32 @@ namespace PSTT.Data
                     _ = sub.InvokeCallback(subscription, ct);
             });
 
-            await OnInvokeCallback(cancellationToken);
+            if (fireTreeWalk)
+                await OnInvokeCallback(cancellationToken);
+        }
+
+        /// <summary>
+        /// Updates this item's value/status from an upstream callback and fires direct
+        /// subscribers, but skips the <see cref="OnInvokeCallback"/> tree walk.
+        /// Wildcard subscribers have their own upstream subscriptions that fire independently
+        /// when the upstream publishes, so the tree walk must not also deliver to them or
+        /// they will receive duplicate callbacks for every upstream publish.
+        /// </summary>
+        internal async Task PublishFromUpstreamAsync(TValue value, IStatus? status, CancellationToken cancellationToken = default)
+        {
+            Value = value;
+            if (status == null)
+            {
+                if (!Status.IsActive)
+                {
+                    Status.State = IStatus.StateValue.Active;
+                    Status.Message = null;
+                    Status.Code = 0;
+                }
+            }
+            else
+                Status = status;
+            await InvokeCallback(null, fireTreeWalk: false, cancellationToken);
         }
 
         protected virtual async Task OnInvokeCallback(CancellationToken cancellationToken = default)

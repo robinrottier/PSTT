@@ -121,6 +121,12 @@ namespace PSTT.Data
                 // - so either an exact match or single wildcard...
                 if (path.Length == 0)
                 {
+                    // MQTT 3.1.1 §4.7.2: wildcards at the root level must not match topics
+                    // whose first segment begins with '$'. Explicit patterns like $DASHBOARD/#
+                    // have a non-empty path so they are unaffected by this rule.
+                    if (other.StartsWith('$'))
+                        return false;
+
                     // # at root just matches everything
                     if (Filter.Length == 1 && Filter[0] == "#")
                         return true;

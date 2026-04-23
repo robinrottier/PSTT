@@ -242,6 +242,12 @@ namespace PSTT.Data
             // Set to true in OnRemove so that any queued async OnInvokeCallback tasks bail out immediately.
             private volatile bool _removed = false;
 
+            // Opaque sentinel passed as the tag to InvokeCallback when the upstream callback should
+            // NOT trigger a tree walk. Wildcard FilterNode subscribers have their own upstream
+            // subscription (Path B) that delivers the value independently — walking the tree (Path A)
+            // would cause them to receive a duplicate. Null tag = do tree walk (normal publish).
+            private static readonly object _suppressTreeWalkTag = new();
+
             public CacheItemWithWildcards(CacheWithWildcards<TKey, TValue> source, TKey key, bool retain, TreeNode node)
                 : base(source, key, retain)
             {
@@ -289,13 +295,14 @@ namespace PSTT.Data
                     // upstream subscription (Path B) that delivers this value independently.
                     // Suppress the OnInvokeCallback tree walk (Path A) to avoid double-delivery:
                     // the '#' subscriber will receive the value via its own upstream callback.
-                    await PublishAsync<bool>(sub.Value, sub.Status, false);
+                    await PublishAsync(sub.Value, sub.Status, _suppressTreeWalkTag);
                 }
                 else
                 {
                     // supportsWildcards: false — wildcard subscribers have NO upstream subscription.
                     // Path A (tree walk in OnInvokeCallback) is the only delivery mechanism for them.
-                    await PublishAsync<bool>(sub.Value, sub.Status, true);
+                    // Null tag = normal publish = do tree walk.
+                    await PublishAsync(sub.Value, sub.Status, null);
                 }
             }
 
@@ -343,12 +350,11 @@ namespace PSTT.Data
 
             // this item has had an update and all subscriptions have been fired,
             // so now we need to check if we have any wildcard subscribers above us in the tree and fire them too
-            protected override async Task OnInvokeCallback<TTag>(TTag tag, CancellationToken cancellationToken = default)
+            protected override async Task OnInvokeCallback(object? tag, CancellationToken cancellationToken = default)
             {
-                // Suppress tree walk when the upstream signals that wildcard subscribers already have their
-                // own upstream subscription (Path B) that delivers the value independently.
-                // tag=false means suppress; tag=null or tag=true means proceed with tree walk.
-                if (tag is bool fireTreeWalk && !fireTreeWalk)
+                // Suppress tree walk when the upstream signals that wildcard subscribers already have
+                // their own upstream subscription (Path B) delivering independently.
+                if (ReferenceEquals(tag, _suppressTreeWalkTag))
                     return;
 
                 // Bail out immediately if this item has already been removed.

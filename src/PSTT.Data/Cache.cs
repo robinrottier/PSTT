@@ -237,7 +237,7 @@ namespace PSTT.Data
                 Status.Message = null;
                 Status.Code = 0;
             }
-            await InvokeCallback<object?>(null, null, cancellationToken);
+            await InvokeCallback(null, null, cancellationToken);
         }
 
         public async Task PublishAsync(IStatus status, CancellationToken cancellationToken = default)
@@ -247,7 +247,7 @@ namespace PSTT.Data
             Status.State = status.State;
             Status.Message = status.Message;
             Status.Code = status.Code;
-            await InvokeCallback<object?>(null, null, cancellationToken);
+            await InvokeCallback(null, null, cancellationToken);
         }
 
         public async Task PublishAsync(TValue value, IStatus? status, CancellationToken cancellationToken = default)
@@ -264,7 +264,7 @@ namespace PSTT.Data
             }
             else
                 Status = status;
-            await InvokeCallback<object?>(null, null, cancellationToken);
+            await InvokeCallback(null, null, cancellationToken);
         }
 
         protected async Task InvokeCallback(ISubscription<TKey, TValue>? subscription = null, CancellationToken cancellationToken = default)
@@ -280,28 +280,23 @@ namespace PSTT.Data
         }
 
         /// <summary>
-        /// Fires all active subscriber callbacks, then optionally calls
-        /// <see cref="OnInvokeCallback"/> for the tree-walk that delivers to wildcard
-        /// subscribers above this item in the key hierarchy.
-        /// Pass <paramref name="fireTreeWalk"/>=<c>false</c> when an upstream callback
-        /// is the origin of this update: wildcard subscribers have their own independent
-        /// upstream subscriptions that already deliver the value (Path B), so walking the
-        /// tree (Path A) would cause them to receive a duplicate delivery.
+        /// Fires all active subscriber callbacks, then calls <see cref="OnInvokeCallback"/> with
+        /// the provided <paramref name="tag"/>. The base class passes the tag through blindly;
+        /// derived classes set and interpret it to control post-callback behaviour (e.g. tree walk).
+        /// Pass <c>null</c> for a normal local publish (derived classes treat null as "do tree walk").
         /// </summary>
-        protected async Task InvokeCallback<TTag>(ISubscription<TKey, TValue>? subscription, TTag tag, CancellationToken cancellationToken = default)
+        protected async Task InvokeCallback(ISubscription<TKey, TValue>? subscription, object? tag, CancellationToken cancellationToken = default)
         {
             await InvokeCallback(subscription, cancellationToken);
             await OnInvokeCallback(tag, cancellationToken);
         }
 
         /// <summary>
-        /// Updates this item's value/status from an upstream callback and fires direct
-        /// subscribers, but skips the <see cref="OnInvokeCallback"/> tree walk.
-        /// Wildcard subscribers have their own upstream subscriptions that fire independently
-        /// when the upstream publishes, so the tree walk must not also deliver to them or
-        /// they will receive duplicate callbacks for every upstream publish.
+        /// Updates this item's value/status then fires subscribers and calls
+        /// <see cref="OnInvokeCallback"/> with the provided <paramref name="tag"/>.
+        /// Used by upstream-callback paths that need to control tree-walk behaviour via the tag.
         /// </summary>
-        internal async Task PublishAsync<TTag>(TValue value, IStatus? status, TTag tag, CancellationToken cancellationToken = default)
+        internal async Task PublishAsync(TValue value, IStatus? status, object? tag, CancellationToken cancellationToken = default)
         {
             Value = value;
             if (status == null)
@@ -318,10 +313,8 @@ namespace PSTT.Data
             await InvokeCallback(null, tag, cancellationToken);
         }
 
-        protected virtual async Task OnInvokeCallback<TTag>(TTag tag, CancellationToken cancellationToken = default)
-        {
-            await Task.CompletedTask;
-        }
+        protected virtual Task OnInvokeCallback(object? tag, CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
 
         // Wildcard items override this to always return true because InitialInvokeAsync must walk
         // the subtree for existing matches regardless of the item's own status.

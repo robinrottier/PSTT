@@ -178,6 +178,21 @@ namespace PSTT.Mqtt
             return this;
         }
 
+        /// <summary>
+        /// Sets the grace period before the upstream MQTT broker subscription is torn down
+        /// after the last local subscriber disposes. A new subscriber arriving within this
+        /// window reuses the existing broker subscription — avoiding an unnecessary
+        /// MQTT unsubscribe/resubscribe round-trip (e.g. during page navigation).
+        /// <see cref="TimeSpan.Zero"/> (the default) disables the grace period.
+        /// </summary>
+        public MqttCacheBuilder<TValue> WithUnsubscribeGracePeriod(TimeSpan period)
+        {
+            if (period < TimeSpan.Zero)
+                throw new ArgumentOutOfRangeException(nameof(period), "Must be >= 0");
+            _dsConfig.UnsubscribeGracePeriod = period;
+            return this;
+        }
+
         // ── Build ─────────────────────────────────────────────────────────────
 
         /// <summary>

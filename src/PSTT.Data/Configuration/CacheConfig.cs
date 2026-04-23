@@ -67,5 +67,14 @@ namespace PSTT.Data
         /// Default: false
         /// </summary>
         public bool EnableWildcards { get; set; } = false;
+
+        /// <summary>
+        /// Grace period before the upstream subscription is torn down after the last local subscriber
+        /// disposes. If a new subscriber arrives within this window the upstream subscription is
+        /// reused, avoiding a needless MQTT unsubscribe/resubscribe round-trip (e.g. during page
+        /// navigation). <see cref="TimeSpan.Zero"/> (the default) disables the grace period and
+        /// restores the original immediate-removal behaviour.
+        /// </summary>
+        public TimeSpan UnsubscribeGracePeriod { get; set; } = TimeSpan.Zero;
     }
 }

@@ -115,7 +115,20 @@ namespace PSTT.Data
         }
 
         /// <summary>
-        /// Enables pattern-based key matching using the supplied <paramref name="matcher"/>,
+        /// Sets the grace period before the upstream subscription is removed after the last local
+        /// subscriber disposes. A new subscriber arriving within this window reuses the existing
+        /// upstream connection rather than issuing a fresh unsubscribe/resubscribe.
+        /// Use this to avoid MQTT traffic spikes during rapid page navigation.
+        /// </summary>
+        public CacheBuilder<TKey, TValue> WithUnsubscribeGracePeriod(TimeSpan period)
+        {
+            if (period < TimeSpan.Zero)
+                throw new ArgumentOutOfRangeException(nameof(period), "Must be >= 0");
+            _config.UnsubscribeGracePeriod = period;
+            return this;
+        }
+
+        /// <summary>
         /// or the default <see cref="MqttWildcardMatcher"/> when called with no argument.
         /// Implicitly enables wildcard support (equivalent to also calling <see cref="WithWildcards"/>).
         /// </summary>

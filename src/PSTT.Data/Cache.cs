@@ -203,6 +203,19 @@ namespace PSTT.Data
         // Upstream subscription — set by DataSource.NewItem when Source.Upstream != null
         internal ISubscription<TKey, TValue>? UpstreamSub { get; set; }
 
+        // Grace-period timer: started when the last subscriber unsubscribes, cancelled if a new
+        // subscriber arrives within the grace window. Access must be guarded by lock(this).
+        internal Timer? _gracePeriodTimer;
+
+        internal void CancelGracePeriodTimer()
+        {
+            // Change to Infinite prevents a pending callback from firing.
+            // Dispose releases the OS timer handle. Both are no-ops if already fired/null.
+            _gracePeriodTimer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            _gracePeriodTimer?.Dispose();
+            _gracePeriodTimer = null;
+        }
+
         internal async Task UpstreamCallback(ISubscription<TKey, TValue> sub)
         {
             await PublishAsync(sub.Value, sub.Status);
@@ -422,6 +435,12 @@ namespace PSTT.Data
         public int MaxSubscriptionsTotal => Config.MaxSubscriptionsTotal;
 
         /// <summary>
+        /// Grace period before upstream is removed after the last subscriber disposes.
+        /// Zero means immediate removal (default behaviour).
+        /// </summary>
+        public TimeSpan UnsubscribeGracePeriod => Config.UnsubscribeGracePeriod;
+
+        /// <summary>
         /// Whether publisher waits for all subscription callbacks to complete before returning from PublishAsync.
         /// </summary>
         public bool WaitOnSubscriptionCallback => Config.Dispatcher.WaitsForCompletion;
@@ -463,6 +482,12 @@ namespace PSTT.Data
 
         public virtual void Clear()
         {
+            // Cancel any pending grace-period timers before clearing the cache.
+            foreach (var col in _cache.Values)
+            {
+                lock (col)
+                    col.CancelGracePeriodTimer();
+            }
             _cache.Clear();
         }
 
@@ -516,6 +541,8 @@ namespace PSTT.Data
         // Shared setup for Subscribe and SubscribeAsync: reserves counts, gets/creates the item,
         // attaches upstream, adds the subscription, and atomically captures NeedsInitialInvoke.
         // Rolls back _subscribeCount on failure. Does NOT dispatch InitialInvokeAsync.
+        // Includes a retry loop to handle the rare race where a grace-period timer removes the
+        // item from _cache between GetOrAdd and the lock acquisition.
         private (CacheItem<TKey, TValue> col, Subscription<TKey, TValue> sub, bool shouldInitialInvoke)
             SubscribeCore(TKey key, Func<ISubscription<TKey, TValue>, Task> callback)
         {
@@ -530,37 +557,65 @@ namespace PSTT.Data
 
             try
             {
-                var col = _cache.GetOrAdd(key, k =>
+                Subscription<TKey, TValue>? sub = null;
+                bool shouldInitialInvoke = false;
+                CacheItem<TKey, TValue> col;
+
+                while (true)
                 {
-                    var newTopicCount = Interlocked.Increment(ref _topicCount);
-                    if (MaxTopics > 0 && newTopicCount > MaxTopics)
+                    col = _cache.GetOrAdd(key, k =>
                     {
-                        Interlocked.Decrement(ref _topicCount);
-                        throw new InvalidOperationException("MaxTopics limit exceeded");
+                        var newTopicCount = Interlocked.Increment(ref _topicCount);
+                        if (MaxTopics > 0 && newTopicCount > MaxTopics)
+                        {
+                            Interlocked.Decrement(ref _topicCount);
+                            throw new InvalidOperationException("MaxTopics limit exceeded");
+                        }
+                        return NewItem(k);
+                    });
+
+                    // Lazily attach upstream subscription when the first real subscriber arrives.
+                    // Items created by PublishAsync have no upstream sub yet; items created here
+                    // (new key) also need attaching. Both cases are handled identically.
+                    AttachUpstream(col);
+
+                    bool retry = false;
+                    lock (col)
+                    {
+                        // Cancel any pending grace-period timer. Both this code and the timer
+                        // callback hold lock(col), so they are mutually exclusive:
+                        // - If we acquire the lock first: we cancel the timer; item stays in cache.
+                        // - If the timer fires first: it removes the item; we detect the stale
+                        //   reference below and retry with the freshly-created item.
+                        col.CancelGracePeriodTimer();
+
+                        // Verify the item is still the current entry for this key.
+                        // A concurrent grace-period removal that won the lock race will have called
+                        // RemoveItem which deletes the key from _cache, so TryGetValue returns false
+                        // (or returns a different, newer item).
+                        if (!_cache.TryGetValue(key, out var current) || !ReferenceEquals(current, col))
+                        {
+                            retry = true;
+                        }
+                        else
+                        {
+                            if (col.Count >= MaxSubscriptionsPerTopic && MaxSubscriptionsPerTopic > 0)
+                                throw new InvalidOperationException("Subscription count per topic exceeded");
+
+                            sub = col.Add(callback);
+                            // Capture the status atomically with the subscription add. If there is already
+                            // a value we must fire the initial callback; if not, any incoming value will
+                            // arrive via InvokeCallback which already includes this subscriber.
+                            shouldInitialInvoke = col.NeedsInitialInvoke;
+                        }
                     }
-                    return NewItem(k);
-                });
 
-                // Lazily attach upstream subscription when the first real subscriber arrives.
-                // Items created by PublishAsync have no upstream sub yet; items created here
-                // (new key) also need attaching. Both cases are handled identically.
-                AttachUpstream(col);
-
-                Subscription<TKey, TValue> sub;
-                bool shouldInitialInvoke;
-                lock (col)
-                {
-                    if (col.Count >= MaxSubscriptionsPerTopic && MaxSubscriptionsPerTopic > 0)
-                        throw new InvalidOperationException("Subscription count per topic exceeded");
-
-                    sub = col.Add(callback);
-                    // Capture the status atomically with the subscription add. If there is already
-                    // a value we must fire the initial callback; if not, any incoming value will
-                    // arrive via InvokeCallback which already includes this subscriber.
-                    shouldInitialInvoke = col.NeedsInitialInvoke;
+                    if (!retry) break;
+                    // The grace-period timer won the race and removed the item from _cache.
+                    // Loop once more: GetOrAdd will create a fresh item and we proceed normally.
                 }
 
-                return (col, sub, shouldInitialInvoke);
+                return (col, sub!, shouldInitialInvoke);
             }
             catch
             {
@@ -601,8 +656,44 @@ namespace PSTT.Data
                 // - use _removeOnce to prevent a concurrent HandleFailStatus from double-removing
                 if (!col.Retain && col.Count == 0)
                 {
-                    if (Interlocked.Exchange(ref col._removeOnce, 1) == 0)
-                        RemoveItem(col);
+                    var grace = UnsubscribeGracePeriod;
+                    if (grace > TimeSpan.Zero)
+                    {
+                        bool scheduleTimer;
+                        lock (col)
+                        {
+                            // Double-check count under lock — a concurrent Subscribe may have arrived.
+                            scheduleTimer = !col.Retain && col.Count == 0;
+                            if (scheduleTimer)
+                            {
+                                // Replace any existing timer (rapid unsub/resub churn).
+                                col.CancelGracePeriodTimer();
+                                col._gracePeriodTimer = new Timer(_ =>
+                                {
+                                    bool shouldRemove = false;
+                                    lock (col)
+                                    {
+                                        // Only remove if still no subscribers and not already removed.
+                                        if (!col.Retain && col.Count == 0)
+                                        {
+                                            if (Interlocked.Exchange(ref col._removeOnce, 1) == 0)
+                                            {
+                                                col.CancelGracePeriodTimer();
+                                                shouldRemove = true;
+                                            }
+                                        }
+                                    }
+                                    if (shouldRemove)
+                                        RemoveItem(col);
+                                }, null, grace, Timeout.InfiniteTimeSpan);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        if (Interlocked.Exchange(ref col._removeOnce, 1) == 0)
+                            RemoveItem(col);
+                    }
                 }
                 return;
             }
@@ -651,8 +742,14 @@ namespace PSTT.Data
 
         internal virtual void RemoveItem(CacheItem<TKey, TValue> col)
         {
-            if (Upstream != null && col.UpstreamSub != null)
-                Upstream.Unsubscribe(col.UpstreamSub);
+            ISubscription<TKey, TValue>? upstreamSub;
+            lock (col)
+            {
+                upstreamSub = col.UpstreamSub;
+                col.UpstreamSub = null;
+            }
+            if (Upstream != null && upstreamSub != null)
+                Upstream.Unsubscribe(upstreamSub);
 
             bool ret = _cache.Remove(col.Key, out var v);
             if (ret)

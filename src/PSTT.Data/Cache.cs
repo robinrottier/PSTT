@@ -237,7 +237,7 @@ namespace PSTT.Data
                 Status.Message = null;
                 Status.Code = 0;
             }
-            await InvokeCallback(null, cancellationToken);
+            await InvokeCallback<object?>(null, null, cancellationToken);
         }
 
         public async Task PublishAsync(IStatus status, CancellationToken cancellationToken = default)
@@ -247,7 +247,7 @@ namespace PSTT.Data
             Status.State = status.State;
             Status.Message = status.Message;
             Status.Code = status.Code;
-            await InvokeCallback(null, cancellationToken);
+            await InvokeCallback<object?>(null, null, cancellationToken);
         }
 
         public async Task PublishAsync(TValue value, IStatus? status, CancellationToken cancellationToken = default)
@@ -264,11 +264,20 @@ namespace PSTT.Data
             }
             else
                 Status = status;
-            await InvokeCallback(null, cancellationToken);
+            await InvokeCallback<object?>(null, null, cancellationToken);
         }
 
         protected async Task InvokeCallback(ISubscription<TKey, TValue>? subscription = null, CancellationToken cancellationToken = default)
-            => await InvokeCallback(subscription, fireTreeWalk: true, cancellationToken);
+        {
+            await Parallel.ForEachAsync(Subscriptions.Where(s => s.IsActive), cancellationToken, async (sub, ct) =>
+            {
+                // fire and dont wait for the Task to complete
+                if (Source.WaitOnSubscriptionCallback)
+                    await sub.InvokeCallback(subscription, ct);
+                else
+                    _ = sub.InvokeCallback(subscription, ct);
+            });
+        }
 
         /// <summary>
         /// Fires all active subscriber callbacks, then optionally calls
@@ -279,19 +288,10 @@ namespace PSTT.Data
         /// upstream subscriptions that already deliver the value (Path B), so walking the
         /// tree (Path A) would cause them to receive a duplicate delivery.
         /// </summary>
-        protected async Task InvokeCallback(ISubscription<TKey, TValue>? subscription, bool fireTreeWalk, CancellationToken cancellationToken = default)
+        protected async Task InvokeCallback<TTag>(ISubscription<TKey, TValue>? subscription, TTag tag, CancellationToken cancellationToken = default)
         {
-            await Parallel.ForEachAsync(Subscriptions.Where(s => s.IsActive), cancellationToken, async (sub, ct) =>
-            {
-                // fire and dont wait for the Task to complete
-                if (Source.WaitOnSubscriptionCallback)
-                    await sub.InvokeCallback(subscription, ct);
-                else
-                    _ = sub.InvokeCallback(subscription, ct);
-            });
-
-            if (fireTreeWalk)
-                await OnInvokeCallback(cancellationToken);
+            await InvokeCallback(subscription, cancellationToken);
+            await OnInvokeCallback(tag, cancellationToken);
         }
 
         /// <summary>
@@ -301,7 +301,7 @@ namespace PSTT.Data
         /// when the upstream publishes, so the tree walk must not also deliver to them or
         /// they will receive duplicate callbacks for every upstream publish.
         /// </summary>
-        internal async Task PublishFromUpstreamAsync(TValue value, IStatus? status, CancellationToken cancellationToken = default)
+        internal async Task PublishAsync<TTag>(TValue value, IStatus? status, TTag tag, CancellationToken cancellationToken = default)
         {
             Value = value;
             if (status == null)
@@ -315,10 +315,10 @@ namespace PSTT.Data
             }
             else
                 Status = status;
-            await InvokeCallback(null, fireTreeWalk: false, cancellationToken);
+            await InvokeCallback(null, tag, cancellationToken);
         }
 
-        protected virtual async Task OnInvokeCallback(CancellationToken cancellationToken = default)
+        protected virtual async Task OnInvokeCallback<TTag>(TTag tag, CancellationToken cancellationToken = default)
         {
             await Task.CompletedTask;
         }

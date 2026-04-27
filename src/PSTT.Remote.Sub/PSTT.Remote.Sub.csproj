@@ -19,8 +19,4 @@
     <ProjectReference Include="..\PSTT.Remote\PSTT.Remote.csproj" />
   </ItemGroup>
 
-  <Target Name="PostBuild" AfterTargets="PostBuildEvent">
-    <Exec Command="call ..\postbuild.bat $(Configuration) $(TargetPath)" />
-  </Target>
-
 </Project>

@@ -8,6 +8,11 @@
     <AssemblyName>pstt-pub</AssemblyName>
     <RootNamespace>PSTT.Remote.Pub</RootNamespace>
     <Description>Publish a value to a topic on a PSTT TCP cache server.</Description>
+    <!-- Single-file publish: all managed assemblies bundled into one exe.
+         Requires .NET 10 runtime on the target machine (framework-dependent).
+         Build with: dotnet publish -r win-x64  (or linux-x64, osx-x64, etc.) -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
   </PropertyGroup>
 
   <ItemGroup>

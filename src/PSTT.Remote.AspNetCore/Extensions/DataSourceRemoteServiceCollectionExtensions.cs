@@ -2,9 +2,12 @@ using PSTT.Data;
 using PSTT.Remote;
 using PSTT.Remote.AspNetCore.SignalR;
 using PSTT.Remote.AspNetCore.WebSocket;
+using PSTT.Remote.Transport.Tcp;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using System.Net;
 
 namespace PSTT.Remote.AspNetCore.Extensions
 {
@@ -95,5 +98,53 @@ namespace PSTT.Remote.AspNetCore.Extensions
             });
             return endpoints;
         }
+        // ── TCP ────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Register a <see cref="RemoteCacheServer{TValue}"/> backed by a raw TCP transport.
+        /// The server is started/stopped automatically via <see cref="IHostedService"/>.
+        /// </summary>
+        /// <param name="upstream">The data source to proxy.</param>
+        /// <param name="port">TCP port to listen on.</param>
+        /// <param name="serializer">Serialize TValue to wire bytes.</param>
+        /// <param name="deserializer">Deserialize wire bytes to TValue.</param>
+        /// <param name="forwardPublish">When true, client publish messages update the upstream cache.</param>
+        /// <param name="bindAddress">Bind address. Defaults to <see cref="IPAddress.Any"/> (all interfaces).</param>
+        public static IServiceCollection AddCacheTcpServer<TValue>(
+            this IServiceCollection services,
+            ICache<string, TValue> upstream,
+            int port,
+            Func<TValue, byte[]> serializer,
+            Func<byte[], TValue> deserializer,
+            bool forwardPublish = false,
+            IPAddress? bindAddress = null)
+        {
+            var transport = new TcpServerTransport(port, bindAddress ?? IPAddress.Any);
+            var server = new RemoteCacheServer<TValue>(
+                upstream, serializer, deserializer, transport, forwardPublish);
+
+            services.AddSingleton(transport);
+            services.AddSingleton(server);
+            // Proper start/stop lifecycle — TCP holds a socket and must be stopped on shutdown.
+            services.AddSingleton<IHostedService>(
+                _ => new TcpCacheServerLifetime(server.StartAsync, server.StopAsync));
+            return services;
+        }
+    }
+
+    /// <summary>Hosts a <see cref="RemoteCacheServer{TValue}"/> TCP listener as a background service.</summary>
+    internal sealed class TcpCacheServerLifetime : IHostedService
+    {
+        private readonly Func<CancellationToken, Task> _start;
+        private readonly Func<Task> _stop;
+
+        internal TcpCacheServerLifetime(Func<CancellationToken, Task> start, Func<Task> stop)
+        {
+            _start = start;
+            _stop  = stop;
+        }
+
+        public Task StartAsync(CancellationToken cancellationToken) => _start(cancellationToken);
+        public Task StopAsync(CancellationToken cancellationToken)  => _stop();
     }
 }

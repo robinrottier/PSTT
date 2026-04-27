@@ -8,6 +8,8 @@
     <Project Path="src/PSTT.Mqtt/PSTT.Mqtt.csproj" />
     <Project Path="src/PSTT.Remote/PSTT.Remote.csproj" />
     <Project Path="src/PSTT.Remote.AspNetCore/PSTT.Remote.AspNetCore.csproj" />
+    <Project Path="src/PSTT.Remote.Sub/PSTT.Remote.Sub.csproj" />
+    <Project Path="src/PSTT.Remote.Pub/PSTT.Remote.Pub.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/PSTT.Data.Builder.Tests/PSTT.Data.Builder.Tests.csproj" />

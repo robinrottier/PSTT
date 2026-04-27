@@ -4,6 +4,7 @@
   </Folder>
   <Folder Name="/src/">
     <File Path="src/Directory.Build.props" />
+    <File Path="src/postbuild.bat" />
     <Project Path="src/PSTT.Data/PSTT.Data.csproj" />
     <Project Path="src/PSTT.Mqtt/PSTT.Mqtt.csproj" />
     <Project Path="src/PSTT.Remote/PSTT.Remote.csproj" />

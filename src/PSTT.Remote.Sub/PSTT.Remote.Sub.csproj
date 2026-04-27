@@ -8,6 +8,11 @@
     <AssemblyName>pstt-sub</AssemblyName>
     <RootNamespace>PSTT.Remote.Sub</RootNamespace>
     <Description>Subscribe to topics on a PSTT TCP cache server and print received values.</Description>
+    <!-- Single-file publish: all managed assemblies bundled into one exe.
+         Requires .NET 10 runtime on the target machine (framework-dependent).
+         Build with: dotnet publish -r win-x64  (or linux-x64, osx-x64, etc.) -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
   </PropertyGroup>
 
   <ItemGroup>

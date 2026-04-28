@@ -500,6 +500,17 @@ namespace PSTT.Data
             _cache.Where(kv => kv.Value.Status.State != IStatus.StateValue.Pending)
                   .ToDictionary(kv => kv.Key, kv => kv.Value.Value);
 
+        /// <summary>
+        /// Base implementation: exact-key lookup only (no wildcard support).
+        /// <see cref="CacheWithWildcards{TKey,TValue}"/> overrides this to apply the matcher.
+        /// </summary>
+        public virtual IReadOnlyDictionary<TKey, TValue> GetSnapshot(TKey pattern)
+        {
+            if (TryGetValue(pattern, out var val))
+                return new Dictionary<TKey, TValue> { [pattern] = val! };
+            return new Dictionary<TKey, TValue>();
+        }
+
         public TValue? GetValue(TKey key)
         {
             TryGetValue(key, out var val);

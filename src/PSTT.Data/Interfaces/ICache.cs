@@ -37,6 +37,14 @@ namespace PSTT.Data
         /// <summary>Returns a point-in-time snapshot of all retained/active key-value pairs.</summary>
         IReadOnlyDictionary<TKey, TValue> GetSnapshot();
 
+        /// <summary>
+        /// Returns a point-in-time snapshot of all retained/active key-value pairs whose key
+        /// matches <paramref name="pattern"/>. Wildcard patterns (e.g. <c>sensors/#</c>,
+        /// <c>room/+/temp</c>) are resolved by the cache's configured matcher. Exact keys return
+        /// at most one entry. Implementations without wildcard support fall back to exact-key lookup.
+        /// </summary>
+        IReadOnlyDictionary<TKey, TValue> GetSnapshot(TKey pattern);
+
         // pub operations
         // -- publish a value and trigger updates to subscribers
         // -- retain flag means that value will stay in cache even if no current subscribers

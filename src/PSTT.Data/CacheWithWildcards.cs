@@ -199,6 +199,26 @@ namespace PSTT.Data
 
         internal RootNode root = new();
 
+        /// <summary>
+        /// Returns all retained key-value pairs whose key matches <paramref name="pattern"/>.
+        /// Wildcard patterns (e.g. <c>sensors/#</c>, <c>room/+/temp</c>) are resolved using the
+        /// configured matcher. Exact-key patterns return at most one entry.
+        /// </summary>
+        public override IReadOnlyDictionary<TKey, TValue> GetSnapshot(TKey pattern)
+        {
+            if (_matcher == null || !_matcher.IsPattern(pattern))
+            {
+                // Exact key: delegate to base (single lookup)
+                return base.GetSnapshot(pattern);
+            }
+            // Wildcard pattern: filter the full snapshot using the configured matcher.
+            // GetSnapshot() excludes Pending items (including wildcard subscription nodes),
+            // so only concrete retained data items appear in the result.
+            return GetSnapshot()
+                .Where(kv => _matcher.Matches(pattern, kv.Key))
+                .ToDictionary(kv => kv.Key, kv => kv.Value);
+        }
+
         public struct Counts
         {
             public int SubCount;

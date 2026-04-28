@@ -110,6 +110,9 @@ namespace PSTT.Data
         public IReadOnlyDictionary<TKey, TValue> GetSnapshot()
             => _local.GetSnapshot();
 
+        public IReadOnlyDictionary<TKey, TValue> GetSnapshot(TKey pattern)
+            => _local.GetSnapshot(pattern);
+
         public int Count => _local.Count;
 
         public void Clear()

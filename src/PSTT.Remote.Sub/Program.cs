@@ -32,6 +32,7 @@ Console.Error.WriteLine($"Connecting to {host}:{port} ...");
 await using var cache = new RemoteCacheBuilder<string>()
     .WithTcpTransport(host, port)
     .WithUtf8Encoding()
+    .WithAutoReconnect()
     .Build();
 
 try

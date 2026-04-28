@@ -33,6 +33,9 @@ namespace PSTT.Remote
         // it's called from within an incoming-message handler.
         private int _incomingMessageDepth;
 
+        private bool _autoReconnect;
+        private TimeSpan _reconnectDelay;
+
         private bool _connected;
         private bool _disposed;
 
@@ -42,16 +45,22 @@ namespace PSTT.Remote
         /// <param name="deserializer">Convert raw payload bytes to TValue.</param>
         /// <param name="serializer">Convert TValue to bytes for publishing. Optional.</param>
         /// <param name="config">Optional DataSource configuration.</param>
+        /// <param name="autoReconnect">When true, automatically reconnects after an unexpected disconnect.</param>
+        /// <param name="reconnectDelay">Delay between reconnect attempts. Defaults to 5 seconds.</param>
         public RemoteCache(
             IRemoteTransport transport,
             Func<byte[], TValue> deserializer,
             Func<TValue, byte[]>? serializer = null,
-            CacheConfig<string, TValue>? config = null)
+            CacheConfig<string, TValue>? config = null,
+            bool autoReconnect = false,
+            TimeSpan? reconnectDelay = null)
             : base(config ?? new CacheConfig<string, TValue>())
         {
             _transport    = transport    ?? throw new ArgumentNullException(nameof(transport));
             _deserializer = deserializer ?? throw new ArgumentNullException(nameof(deserializer));
             _serializer   = serializer;
+            _autoReconnect  = autoReconnect;
+            _reconnectDelay = reconnectDelay ?? TimeSpan.FromSeconds(5);
 
             _transport.MessageReceived += OnMessageReceivedAsync;
             _transport.Disconnected    += OnDisconnectedAsync;
@@ -233,6 +242,20 @@ namespace PSTT.Remote
             var stale = new Status { State = IStatus.StateValue.Stale, Message = "Remote server disconnected" };
             foreach (var key in keys)
                 await base.PublishAsync(key, stale);
+
+            if (_autoReconnect && !_disposed)
+                _ = Task.Run(() => AutoReconnectLoopAsync());
+        }
+
+        private async Task AutoReconnectLoopAsync()
+        {
+            while (!_disposed && !_connected)
+            {
+                await Task.Delay(_reconnectDelay);
+                if (_disposed) break;
+                try { await ConnectAsync(); }
+                catch { /* keep retrying */ }
+            }
         }
     }
 }

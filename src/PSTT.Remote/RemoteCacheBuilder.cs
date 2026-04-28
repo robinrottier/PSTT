@@ -30,6 +30,8 @@ namespace PSTT.Remote
         private Func<byte[], TValue>? _deserializer;
         private Func<TValue, byte[]>? _serializer;
         private readonly CacheConfig<string, TValue> _dsConfig = new();
+        private bool _autoReconnect;
+        private TimeSpan _reconnectDelay = TimeSpan.FromSeconds(5);
 
         // ── Transport ─────────────────────────────────────────────────────────
 
@@ -150,6 +152,18 @@ namespace PSTT.Remote
             return this;
         }
 
+        /// <summary>
+        /// Enables automatic reconnection when the server connection drops unexpectedly.
+        /// The cache will re-subscribe to all topics after each successful reconnect.
+        /// </summary>
+        /// <param name="delay">Delay between reconnect attempts. Defaults to 5 seconds.</param>
+        public RemoteCacheBuilder<TValue> WithAutoReconnect(TimeSpan? delay = null)
+        {
+            _autoReconnect = true;
+            if (delay.HasValue) _reconnectDelay = delay.Value;
+            return this;
+        }
+
         // ── Build ─────────────────────────────────────────────────────────────
 
         /// <summary>
@@ -168,7 +182,7 @@ namespace PSTT.Remote
                 throw new InvalidOperationException(
                     "Encoding is required. Call WithEncoding(), WithUtf8Encoding(), or WithJsonEncoding() before Build().");
 
-            return new RemoteCache<TValue>(_transport, _deserializer, _serializer, _dsConfig);
+            return new RemoteCache<TValue>(_transport, _deserializer, _serializer, _dsConfig, _autoReconnect, _reconnectDelay);
         }
     }
 

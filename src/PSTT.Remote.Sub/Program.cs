@@ -164,7 +164,7 @@ static Tree BuildTopicTree(
 
 static string FormatLeaf(string segment, string? value, bool isActive, string? statusMsg) =>
     isActive
-        ? $"[cyan]{Markup.Escape(segment)}[/] = [green]{Markup.Escape(value ?? "")}"
+        ? $"[cyan]{Markup.Escape(segment)}[/] = [green]{Markup.Escape(value ?? "")}[/]"
         : $"[dim]{Markup.Escape(segment)} [{Markup.Escape(statusMsg ?? "stale")}][/]";
 
 static void PrintUsage()

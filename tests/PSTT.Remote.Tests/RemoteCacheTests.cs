@@ -124,7 +124,8 @@ namespace PSTT.Remote.Tests
                 // Seed subscription ensures the upstream creates and keeps the cache entry
                 seedSub = _upstream.Subscribe("preloaded/value", async _ => { });
                 await _upstream.PublishAsync("preloaded/value", "PRE-EXISTING");
-                await Task.Delay(50);
+                // Wait until the upstream cache actually retains the value to avoid a timing race
+                Assert.True(await WaitForAsync(() => _upstream.GetSnapshot("preloaded/value").Count > 0, 5000), "Upstream cache did not retain preloaded value in time");
 
                 await using var client = CreateClient();
                 await client.ConnectAsync();

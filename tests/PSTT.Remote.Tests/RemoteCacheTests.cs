@@ -21,9 +21,14 @@ namespace PSTT.Remote.Tests
     /// </summary>
     public class RemoteDataSourceTests : IAsyncLifetime
     {
-        // ── Shared server plumbing ────────────────────────────────────────────
+        // ── Per-test server plumbing ──────────────────────────────────────────
+        //
+        // xUnit creates a NEW instance of this class for every [Fact], so
+        // IAsyncLifetime.InitializeAsync / DisposeAsync run once per test (not
+        // once per class).  Every test therefore gets its own _upstream, _server,
+        // and OS-assigned port — there is no shared state between tests.
+        // (IClassFixture<T> would share state; that is deliberately not used here.)
 
-        /// <summary>In-process upstream DataSource used by all tests.</summary>
         private CacheWithWildcards<string, string> _upstream = null!;
         private RemoteCacheServer<string> _server = null!;
         private TcpServerTransport _serverTransport = null!;
@@ -391,20 +396,26 @@ namespace PSTT.Remote.Tests
             var sub2 = client2.Subscribe("persist/topic", async s => { recv2 = s.Value; });
             var sub1 = client1.Subscribe("persist/topic", async s => { recv1 = s.Value; });
 
-            // Give subscriptions a moment to register on the server before we start polling.
-            await Task.Delay(500);
+            // Wait for both Subscribe messages to register on the server.
+            // SubscribeCount increments on the server each time a session calls _upstream.Subscribe(),
+            // so it reaches 2 only once both TCP Subscribe messages have been processed.
+            // On loopback this happens in milliseconds; 5 s is a generous ceiling.
+            // If it doesn't reach 2 in time the message was lost (swallowed send exception) —
+            // publishing data will never help, so fail immediately with a precise diagnosis.
+            var subDeadline = DateTime.UtcNow.AddSeconds(5);
+            while (DateTime.UtcNow < subDeadline && _upstream.SubscribeCount < 2)
+                await Task.Delay(50);
 
-            // Confirm both subscriptions are live on the server before disconnecting client1.
-            // Re-publish until both callbacks fire — the first publish may race ahead of
-            // subscription registration on the server in optimised (Release) builds.
-            var subDeadline = DateTime.UtcNow.AddSeconds(20);
-            while (DateTime.UtcNow < subDeadline && (recv1 != "ready" || recv2 != "ready"))
-            {
-                await _upstream.PublishAsync("persist/topic", "ready");
-                await Task.Delay(200);
-            }
-            Assert.True(recv1 == "ready" && recv2 == "ready",
-                "Subscriptions did not become active in time");
+            Assert.True(_upstream.SubscribeCount >= 2,
+                $"Only {_upstream.SubscribeCount}/2 client subscriptions reached the server within 5 s. " +
+                "The fire-and-forget Subscribe message was likely lost (send exception swallowed). " +
+                "This points to a reliability issue in RemoteCache.AttachUpstream, not a test timing problem.");
+
+            // Both subscriptions are confirmed at the server level; one publish is enough.
+            await _upstream.PublishAsync("persist/topic", "ready");
+            Assert.True(await WaitForAsync(() => recv1 == "ready" && recv2 == "ready"),
+                $"Server subscriptions confirmed but callbacks did not fire " +
+                $"(recv1={recv1 ?? "null"}, recv2={recv2 ?? "null"}).");
             recv2 = null;
 
             // Disconnect client1 and wait for the server to process the disconnect

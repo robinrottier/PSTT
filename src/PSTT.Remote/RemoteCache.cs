@@ -115,7 +115,15 @@ namespace PSTT.Remote
         internal override void AttachUpstream(CacheItem<string, TValue> col)
         {
             base.AttachUpstream(col);
-            _ = SubscribeServerTopicAsync(col.Key);
+            // Use LongRunning to bypass thread-pool starvation: the runtime creates a dedicated
+            // OS thread immediately rather than queuing to the pool. This guarantees the Subscribe
+            // message is sent promptly even when the thread pool is saturated by parallel load
+            // (e.g. concurrent test assemblies or build + test running together).
+            _ = Task.Factory.StartNew(
+                () => SubscribeServerTopicAsync(col.Key),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
         }
 
         internal override void RemoveItem(CacheItem<string, TValue> col)

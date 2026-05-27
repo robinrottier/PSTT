@@ -64,6 +64,7 @@ namespace PSTT.Remote
 
             _transport.MessageReceived += OnMessageReceivedAsync;
             _transport.Disconnected    += OnDisconnectedAsync;
+            _transport.Reconnected     += OnReconnectedAsync;
         }
 
         // ── Lifecycle ──────────────────────────────────────────────────────────
@@ -245,6 +246,17 @@ namespace PSTT.Remote
 
             if (_autoReconnect && !_disposed)
                 _ = Task.Run(() => AutoReconnectLoopAsync());
+        }
+
+        /// <summary>
+        /// Called when the transport reports a successful auto-reconnect (e.g. SignalR reconnected).
+        /// Re-sends all subscriptions without marking data as stale — the connection was only briefly
+        /// interrupted and existing cached values are still valid.
+        /// </summary>
+        private async Task OnReconnectedAsync()
+        {
+            _connected = true;
+            await ResubscribeAllAsync(CancellationToken.None);
         }
 
         private async Task AutoReconnectLoopAsync()

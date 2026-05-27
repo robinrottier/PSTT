@@ -19,6 +19,7 @@ namespace PSTT.Remote.Transport.Tcp
 
         public event Func<ReadOnlyMemory<byte>, Task>? MessageReceived;
         public event Func<Task>? Disconnected;
+        public event Func<Task>? Reconnected;
 
         public bool IsConnected => _tcp.Connected && !_disposed;
 

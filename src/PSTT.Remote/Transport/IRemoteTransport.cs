@@ -16,6 +16,14 @@ namespace PSTT.Remote.Transport
         /// <summary>Raised when the transport detects the peer has disconnected.</summary>
         event Func<Task>? Disconnected;
 
+            /// <summary>
+            /// Raised when a transport that supports automatic reconnection (e.g. SignalR with
+            /// <c>WithAutomaticReconnect()</c>) successfully re-establishes a dropped connection.
+            /// Consumers should re-send any server-side state (subscriptions, etc.) in response.
+            /// Transports that do not support automatic reconnection may leave this event unused.
+            /// </summary>
+            event Func<Task>? Reconnected;
+
         /// <summary>True while the underlying connection is open.</summary>
         bool IsConnected { get; }
 

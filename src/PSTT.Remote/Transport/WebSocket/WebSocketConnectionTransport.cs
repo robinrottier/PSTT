@@ -26,6 +26,7 @@ namespace PSTT.Remote.Transport.WebSocket
 
         public event Func<ReadOnlyMemory<byte>, Task>? MessageReceived;
         public event Func<Task>? Disconnected;
+        public event Func<Task>? Reconnected;
 
         public bool IsConnected => _ws.State == WebSocketState.Open && !_disposed;
 

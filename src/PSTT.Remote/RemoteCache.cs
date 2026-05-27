@@ -36,8 +36,8 @@ namespace PSTT.Remote
         private bool _autoReconnect;
         private TimeSpan _reconnectDelay;
 
-        private bool _connected;
-        private bool _disposed;
+        private volatile bool _connected;
+        private volatile bool _disposed;
 
         /// <param name="transport">
         ///   Transport to the server. Call <see cref="ConnectAsync"/> to open it.

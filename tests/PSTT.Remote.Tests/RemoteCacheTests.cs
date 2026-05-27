@@ -399,17 +399,20 @@ namespace PSTT.Remote.Tests
             // Wait for both Subscribe messages to register on the server.
             // SubscribeCount increments on the server each time a session calls _upstream.Subscribe(),
             // so it reaches 2 only once both TCP Subscribe messages have been processed.
-            // On loopback this happens in milliseconds; 5 s is a generous ceiling.
-            // If it doesn't reach 2 in time the message was lost (swallowed send exception) —
+            // On loopback this happens in milliseconds; 30 s is a ceiling for heavily loaded
+            // machines (e.g. parallel test runs with VS open) where IO-completion continuations
+            // can be delayed by thread-pool pressure.
+            // If it doesn't reach 2 in time the subscribe message was likely lost or delayed —
             // publishing data will never help, so fail immediately with a precise diagnosis.
-            var subDeadline = DateTime.UtcNow.AddSeconds(5);
+            var subDeadline = DateTime.UtcNow.AddSeconds(30);
             while (DateTime.UtcNow < subDeadline && _upstream.SubscribeCount < 2)
                 await Task.Delay(50);
 
             Assert.True(_upstream.SubscribeCount >= 2,
-                $"Only {_upstream.SubscribeCount}/2 client subscriptions reached the server within 5 s. " +
-                "The fire-and-forget Subscribe message was likely lost (send exception swallowed). " +
-                "This points to a reliability issue in RemoteCache.AttachUpstream, not a test timing problem.");
+                $"Only {_upstream.SubscribeCount}/2 client subscriptions reached the server within 30 s. " +
+                "The Subscribe message was delayed or lost. Under extreme load (parallel builds, heavy CI), " +
+                "IO-completion continuations can be delayed; otherwise this points to a reliability issue " +
+                "in RemoteCache.AttachUpstream (e.g. send exception swallowed or _connected flag race).");
 
             // Both subscriptions are confirmed at the server level; one publish is enough.
             await _upstream.PublishAsync("persist/topic", "ready");

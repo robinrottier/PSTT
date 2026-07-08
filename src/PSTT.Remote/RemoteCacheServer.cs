@@ -95,11 +95,17 @@ namespace PSTT.Remote
 
         private sealed class ClientSession : IAsyncDisposable
         {
-            private sealed class SubscriptionState
+            private class SubscriptionState
             {
                 public ISubscription<string, TValue> Subscription { get; set; } = null!;
+            }
+
+            private class KeySendState
+            {
                 public bool IsSending { get; set; }
                 public bool HasPendingUpdate { get; set; }
+                public TValue? LatestValue { get; set; }
+                public IStatus? LatestStatus { get; set; }
                 public object Lock { get; } = new object();
             }
 
@@ -112,6 +118,7 @@ namespace PSTT.Remote
 
             // Map: subscribed key → subscription state
             private readonly Dictionary<string, SubscriptionState> _upstreamSubs = new();
+            private readonly System.Collections.Concurrent.ConcurrentDictionary<string, KeySendState> _conflatedKeys = new();
             private readonly SemaphoreSlim _subLock = new(1, 1);
             private bool _disposed;
 
@@ -169,23 +176,27 @@ namespace PSTT.Remote
 
                         if (_conflateUpdates)
                         {
+                            var keyState = _conflatedKeys.GetOrAdd(s.Key, _ => new KeySendState());
                             bool shouldSend = false;
-                            lock (state.Lock)
+                            lock (keyState.Lock)
                             {
-                                if (state.IsSending)
+                                keyState.LatestValue = s.Value;
+                                keyState.LatestStatus = s.Status;
+
+                                if (keyState.IsSending)
                                 {
-                                    state.HasPendingUpdate = true;
+                                    keyState.HasPendingUpdate = true;
                                 }
                                 else
                                 {
-                                    state.IsSending = true;
+                                    keyState.IsSending = true;
                                     shouldSend = true;
                                 }
                             }
 
                             if (shouldSend)
                             {
-                                await SendLatestAsync(state, s);
+                                await SendLatestAsync(s.Key, keyState);
                             }
                         }
                         else
@@ -212,52 +223,57 @@ namespace PSTT.Remote
                 }
             }
 
-            private async Task SendLatestAsync(SubscriptionState state, ISubscription<string, TValue> s)
+            private async Task SendLatestAsync(string concreteKey, KeySendState keyState)
             {
                 while (true)
                 {
-                    TValue latestValue;
-                    IStatus latestStatus;
+                    TValue? latestValue;
+                    IStatus? latestStatus;
 
-                    latestValue = s.Value;
-                    latestStatus = s.Status;
+                    lock (keyState.Lock)
+                    {
+                        latestValue = keyState.LatestValue;
+                        latestStatus = keyState.LatestStatus;
+                    }
+
+                    if (latestStatus == null) return;
 
                     byte[] payload;
-                    try { payload = _serializer(latestValue); }
+                    try { payload = _serializer(latestValue!); }
                     catch
                     {
-                        lock (state.Lock)
+                        lock (keyState.Lock)
                         {
-                            state.IsSending = false;
-                            state.HasPendingUpdate = false;
+                            keyState.IsSending = false;
+                            keyState.HasPendingUpdate = false;
                         }
                         return;
                     }
 
-                    var msg = RemoteProtocol.Update(s.Key, payload, latestStatus);
+                    var msg = RemoteProtocol.Update(concreteKey, payload, latestStatus);
                     try
                     {
                         await _transport.SendAsync(RemoteProtocol.Encode(msg));
                     }
                     catch
                     {
-                        lock (state.Lock)
+                        lock (keyState.Lock)
                         {
-                            state.IsSending = false;
-                            state.HasPendingUpdate = false;
+                            keyState.IsSending = false;
+                            keyState.HasPendingUpdate = false;
                         }
                         return;
                     }
 
-                    lock (state.Lock)
+                    lock (keyState.Lock)
                     {
-                        if (state.HasPendingUpdate)
+                        if (keyState.HasPendingUpdate)
                         {
-                            state.HasPendingUpdate = false;
+                            keyState.HasPendingUpdate = false;
                         }
                         else
                         {
-                            state.IsSending = false;
+                            keyState.IsSending = false;
                             break;
                         }
                     }

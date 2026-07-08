@@ -27,10 +27,26 @@ namespace PSTT.Data
         public IStatus Status { get { return Collection.Status; } }
         public TValue Value { get { return Collection.Value; } }
         Func<ISubscription<TKey, TValue>, Task> Callback { get; }
+
+        internal HashSet<TKey>? _initialDeliveredKeys;
+        internal readonly object _initialDeliveredLock = new();
+
+        internal void StopTrackingInitialDeliveries()
+        {
+            lock (_initialDeliveredLock)
+            {
+                _initialDeliveredKeys = null;
+            }
+        }
+
         internal Subscription(CacheItem<TKey, TValue> col, Func<ISubscription<TKey, TValue>, Task> callback)
         {
             Collection = col ?? throw new ArgumentNullException(nameof(col));
             Callback = callback;
+            if (col is CacheWithWildcards<TKey, TValue>.CacheItemWithWildcards wildcardItem && wildcardItem.IsWildcard)
+            {
+                _initialDeliveredKeys = new HashSet<TKey>();
+            }
         }
         internal CacheItem<TKey, TValue> Collection { get; private set; }
         internal bool IsActive { get; set; } = true;
@@ -56,6 +72,17 @@ namespace PSTT.Data
 
             if (subscription == null)
                 subscription = this;
+
+            lock (_initialDeliveredLock)
+            {
+                if (_initialDeliveredKeys != null)
+                {
+                    if (!_initialDeliveredKeys.Add(subscription.Key))
+                    {
+                        return;
+                    }
+                }
+            }
 
             try
             {

@@ -23,6 +23,7 @@ namespace PSTT.Remote
         private readonly Func<byte[], TValue> _deserializer;
         private readonly IRemoteServerTransport _serverTransport;
         private readonly bool _forwardPublish;
+        private readonly bool _conflateUpdates;
 
         private readonly List<ClientSession> _sessions = new();
         private readonly object _sessionsLock = new();
@@ -36,18 +37,21 @@ namespace PSTT.Remote
         ///   When true, client "pub" messages are forwarded to the upstream via
         ///   <see cref="ICache{TKey,TValue}.PublishAsync(TKey,TValue,CancellationToken)"/>.
         /// </param>
+        /// <param name="conflateUpdates">When true, conflates client updates per topic to avoid connection congestion.</param>
         public RemoteCacheServer(
             ICache<string, TValue> upstream,
             Func<TValue, byte[]> serializer,
             Func<byte[], TValue> deserializer,
             IRemoteServerTransport serverTransport,
-            bool forwardPublish = false)
+            bool forwardPublish = false,
+            bool conflateUpdates = false)
         {
             _upstream        = upstream        ?? throw new ArgumentNullException(nameof(upstream));
             _serializer      = serializer      ?? throw new ArgumentNullException(nameof(serializer));
             _deserializer    = deserializer    ?? throw new ArgumentNullException(nameof(deserializer));
             _serverTransport = serverTransport ?? throw new ArgumentNullException(nameof(serverTransport));
             _forwardPublish  = forwardPublish;
+            _conflateUpdates = conflateUpdates;
 
             _serverTransport.ClientConnected += OnClientConnectedAsync;
         }
@@ -75,7 +79,7 @@ namespace PSTT.Remote
 
         private async Task OnClientConnectedAsync(IRemoteTransport transport)
         {
-            var session = new ClientSession(transport, _upstream, _serializer, _deserializer, _forwardPublish);
+            var session = new ClientSession(transport, _upstream, _serializer, _deserializer, _forwardPublish, _conflateUpdates);
             lock (_sessionsLock) _sessions.Add(session);
 
             transport.Disconnected += async () =>
@@ -91,14 +95,23 @@ namespace PSTT.Remote
 
         private sealed class ClientSession : IAsyncDisposable
         {
+            private sealed class SubscriptionState
+            {
+                public ISubscription<string, TValue> Subscription { get; set; } = null!;
+                public bool IsSending { get; set; }
+                public bool HasPendingUpdate { get; set; }
+                public object Lock { get; } = new object();
+            }
+
             private readonly IRemoteTransport _transport;
             private readonly ICache<string, TValue> _upstream;
             private readonly Func<TValue, byte[]> _serializer;
             private readonly Func<byte[], TValue> _deserializer;
             private readonly bool _forwardPublish;
+            private readonly bool _conflateUpdates;
 
-            // Map: subscribed key → upstream ISubscription (for clean unsubscription)
-            private readonly Dictionary<string, ISubscription<string, TValue>> _upstreamSubs = new();
+            // Map: subscribed key → subscription state
+            private readonly Dictionary<string, SubscriptionState> _upstreamSubs = new();
             private readonly SemaphoreSlim _subLock = new(1, 1);
             private bool _disposed;
 
@@ -107,13 +120,15 @@ namespace PSTT.Remote
                 ICache<string, TValue> upstream,
                 Func<TValue, byte[]> serializer,
                 Func<byte[], TValue> deserializer,
-                bool forwardPublish)
+                bool forwardPublish,
+                bool conflateUpdates)
             {
-                _transport      = transport;
-                _upstream       = upstream;
-                _serializer     = serializer;
-                _deserializer   = deserializer;
-                _forwardPublish = forwardPublish;
+                _transport       = transport;
+                _upstream        = upstream;
+                _serializer      = serializer;
+                _deserializer    = deserializer;
+                _forwardPublish  = forwardPublish;
+                _conflateUpdates = conflateUpdates;
 
                 _transport.MessageReceived += OnMessageReceivedAsync;
             }
@@ -147,27 +162,105 @@ namespace PSTT.Remote
                     if (_upstreamSubs.ContainsKey(key))
                         return; // already subscribed for this client
 
+                    var state = new SubscriptionState();
                     var sub = _upstream.Subscribe(key, async s =>
                     {
                         if (s.Status.IsPending) return; // no value yet
 
-                        byte[] payload;
-                        try { payload = _serializer(s.Value); }
-                        catch { return; }
-
-                        var msg = RemoteProtocol.Update(s.Key, payload, s.Status);
-                        try
+                        if (_conflateUpdates)
                         {
-                            await _transport.SendAsync(RemoteProtocol.Encode(msg));
+                            bool shouldSend = false;
+                            lock (state.Lock)
+                            {
+                                if (state.IsSending)
+                                {
+                                    state.HasPendingUpdate = true;
+                                }
+                                else
+                                {
+                                    state.IsSending = true;
+                                    shouldSend = true;
+                                }
+                            }
+
+                            if (shouldSend)
+                            {
+                                await SendLatestAsync(state, s);
+                            }
                         }
-                        catch { /* client disconnected */ }
+                        else
+                        {
+                            byte[] payload;
+                            try { payload = _serializer(s.Value); }
+                            catch { return; }
+
+                            var msg = RemoteProtocol.Update(s.Key, payload, s.Status);
+                            try
+                            {
+                                await _transport.SendAsync(RemoteProtocol.Encode(msg));
+                            }
+                            catch { /* client disconnected */ }
+                        }
                     });
 
-                    _upstreamSubs[key] = sub;
+                    state.Subscription = sub;
+                    _upstreamSubs[key] = state;
                 }
                 finally
                 {
                     _subLock.Release();
+                }
+            }
+
+            private async Task SendLatestAsync(SubscriptionState state, ISubscription<string, TValue> s)
+            {
+                while (true)
+                {
+                    TValue latestValue;
+                    IStatus latestStatus;
+
+                    latestValue = s.Value;
+                    latestStatus = s.Status;
+
+                    byte[] payload;
+                    try { payload = _serializer(latestValue); }
+                    catch
+                    {
+                        lock (state.Lock)
+                        {
+                            state.IsSending = false;
+                            state.HasPendingUpdate = false;
+                        }
+                        return;
+                    }
+
+                    var msg = RemoteProtocol.Update(s.Key, payload, latestStatus);
+                    try
+                    {
+                        await _transport.SendAsync(RemoteProtocol.Encode(msg));
+                    }
+                    catch
+                    {
+                        lock (state.Lock)
+                        {
+                            state.IsSending = false;
+                            state.HasPendingUpdate = false;
+                        }
+                        return;
+                    }
+
+                    lock (state.Lock)
+                    {
+                        if (state.HasPendingUpdate)
+                        {
+                            state.HasPendingUpdate = false;
+                        }
+                        else
+                        {
+                            state.IsSending = false;
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -176,9 +269,9 @@ namespace PSTT.Remote
                 await _subLock.WaitAsync();
                 try
                 {
-                    if (!_upstreamSubs.TryGetValue(key, out var sub))
+                    if (!_upstreamSubs.TryGetValue(key, out var state))
                         return;
-                    _upstream.Unsubscribe(sub);
+                    _upstream.Unsubscribe(state.Subscription);
                     _upstreamSubs.Remove(key);
                 }
                 finally
@@ -207,8 +300,8 @@ namespace PSTT.Remote
                 await _subLock.WaitAsync();
                 try
                 {
-                    foreach (var sub in _upstreamSubs.Values)
-                        _upstream.Unsubscribe(sub);
+                    foreach (var state in _upstreamSubs.Values)
+                        _upstream.Unsubscribe(state.Subscription);
                     _upstreamSubs.Clear();
                 }
                 finally

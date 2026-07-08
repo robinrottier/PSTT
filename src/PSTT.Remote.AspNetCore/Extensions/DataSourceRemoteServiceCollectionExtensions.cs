@@ -30,11 +30,12 @@ namespace PSTT.Remote.AspNetCore.Extensions
             ICache<string, TValue> upstream,
             Func<TValue, byte[]> serializer,
             Func<byte[], TValue> deserializer,
-            bool forwardPublish = false)
+            bool forwardPublish = false,
+            bool conflateUpdates = false)
         {
             var transport = new SignalRServerTransport();
             var server = new RemoteCacheServer<TValue>(
-                upstream, serializer, deserializer, transport, forwardPublish);
+                upstream, serializer, deserializer, transport, forwardPublish, conflateUpdates);
             _ = server.StartAsync();
 
             services.AddSingleton(transport);
@@ -70,11 +71,12 @@ namespace PSTT.Remote.AspNetCore.Extensions
             ICache<string, TValue> upstream,
             Func<TValue, byte[]> serializer,
             Func<byte[], TValue> deserializer,
-            bool forwardPublish = false)
+            bool forwardPublish = false,
+            bool conflateUpdates = false)
         {
             var transport = new AspNetCoreWebSocketServerTransport();
             var server = new RemoteCacheServer<TValue>(
-                upstream, serializer, deserializer, transport, forwardPublish);
+                upstream, serializer, deserializer, transport, forwardPublish, conflateUpdates);
             _ = server.StartAsync();
 
             services.AddSingleton(transport);
@@ -110,6 +112,7 @@ namespace PSTT.Remote.AspNetCore.Extensions
         /// <param name="deserializer">Deserialize wire bytes to TValue.</param>
         /// <param name="forwardPublish">When true, client publish messages update the upstream cache.</param>
         /// <param name="bindAddress">Bind address. Defaults to <see cref="IPAddress.Any"/> (all interfaces).</param>
+        /// <param name="conflateUpdates">When true, conflates client updates per topic to avoid connection congestion.</param>
         public static IServiceCollection AddCacheTcpServer<TValue>(
             this IServiceCollection services,
             ICache<string, TValue> upstream,
@@ -117,11 +120,12 @@ namespace PSTT.Remote.AspNetCore.Extensions
             Func<TValue, byte[]> serializer,
             Func<byte[], TValue> deserializer,
             bool forwardPublish = false,
-            IPAddress? bindAddress = null)
+            IPAddress? bindAddress = null,
+            bool conflateUpdates = false)
         {
             var transport = new TcpServerTransport(port, bindAddress ?? IPAddress.Any);
             var server = new RemoteCacheServer<TValue>(
-                upstream, serializer, deserializer, transport, forwardPublish);
+                upstream, serializer, deserializer, transport, forwardPublish, conflateUpdates);
 
             services.AddSingleton(transport);
             services.AddSingleton(server);

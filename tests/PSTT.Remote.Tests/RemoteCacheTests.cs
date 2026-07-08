@@ -606,6 +606,133 @@ namespace PSTT.Remote.Tests
         [Fact]
         public void TcpClient_InvalidPort_Throws()
             => Assert.Throws<ArgumentOutOfRangeException>(() => new TcpClientTransport("host", 0));
+
+        [Fact]
+        public async Task Server_ConflateUpdates_ConflatesRapidPublishes()
+        {
+            var upstream = new CacheWithWildcards<string, string>();
+            var serverTransport = new MockServerTransport();
+
+            // Create server with conflation enabled
+            await using var server = new RemoteCacheServer<string>(
+                upstream,
+                serializer:   s => Encoding.UTF8.GetBytes(s),
+                deserializer: b => Encoding.UTF8.GetString(b),
+                serverTransport,
+                forwardPublish: false,
+                conflateUpdates: true);
+
+            await server.StartAsync();
+
+            var receivedUpdates = new List<string>();
+            var sendDelayTcs = new TaskCompletionSource();
+
+            var clientTransport = new MockClientTransport(async data =>
+            {
+                var msg = PSTT.Remote.Protocol.RemoteProtocol.Decode(data);
+                if (msg?.Type == PSTT.Remote.Protocol.RemoteMessageTypes.Update)
+                {
+                    var payloadBytes = PSTT.Remote.Protocol.RemoteProtocol.DecodePayload(msg);
+                    if (payloadBytes != null)
+                    {
+                        var value = Encoding.UTF8.GetString(payloadBytes);
+                        lock (receivedUpdates)
+                        {
+                            receivedUpdates.Add(value);
+                        }
+                    }
+                }
+
+                // For the first update, wait on our task completion source to simulate congestion
+                await sendDelayTcs.Task;
+            });
+
+            // Connect client session
+            await serverTransport.ConnectClientAsync(clientTransport);
+
+            // Subscribe client to "stats/cpu"
+            await clientTransport.ReceiveMessageAsync(
+                PSTT.Remote.Protocol.RemoteProtocol.Encode(PSTT.Remote.Protocol.RemoteProtocol.Subscribe("stats/cpu")));
+
+            // Publish first value upstream. This will trigger a send, which will block on sendDelayTcs
+            await upstream.PublishAsync("stats/cpu", "10");
+
+            // Let it propagate
+            await Task.Delay(100);
+
+            // Publish more values in rapid succession while first send is still blocked
+            await upstream.PublishAsync("stats/cpu", "20");
+            await upstream.PublishAsync("stats/cpu", "30");
+            await upstream.PublishAsync("stats/cpu", "40");
+
+            // Release the blocked first send
+            sendDelayTcs.SetResult();
+
+            // Give it a moment to complete the sends
+            await Task.Delay(100);
+
+            // Assertions
+            lock (receivedUpdates)
+            {
+                // We expect at most 2 updates:
+                // - The first update ("10") which was blocked.
+                // - The last update ("40") which was conflated from ("20", "30", "40").
+                // Intermediate updates "20" and "30" must be skipped.
+                Assert.Contains("10", receivedUpdates);
+                Assert.Contains("40", receivedUpdates);
+                Assert.DoesNotContain("20", receivedUpdates);
+                Assert.DoesNotContain("30", receivedUpdates);
+                Assert.True(receivedUpdates.Count <= 2, $"Expected at most 2 updates but got {receivedUpdates.Count}");
+            }
+        }
+    }
+
+    // ── Mock Transports for Testing Conflation ───────────────────────────────
+
+    public class MockServerTransport : IRemoteServerTransport
+    {
+        public event Func<IRemoteTransport, Task>? ClientConnected;
+
+        public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task StopAsync() => Task.CompletedTask;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+        public async Task ConnectClientAsync(IRemoteTransport clientTransport)
+        {
+            if (ClientConnected != null)
+                await ClientConnected(clientTransport);
+        }
+    }
+
+    public class MockClientTransport : IRemoteTransport
+    {
+        private readonly Func<ReadOnlyMemory<byte>, Task> _onSend;
+
+        public MockClientTransport(Func<ReadOnlyMemory<byte>, Task> onSend)
+        {
+            _onSend = onSend;
+        }
+
+        public event Func<ReadOnlyMemory<byte>, Task>? MessageReceived;
+        public event Func<Task>? Disconnected;
+        public event Func<Task>? Reconnected;
+
+        public bool IsConnected => true;
+
+        public Task ConnectAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public async Task SendAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
+        {
+            await _onSend(data);
+        }
+
+        public async Task ReceiveMessageAsync(byte[] data)
+        {
+            if (MessageReceived != null)
+                await MessageReceived(data);
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     // ── Test DTOs ────────────────────────────────────────────────────────────

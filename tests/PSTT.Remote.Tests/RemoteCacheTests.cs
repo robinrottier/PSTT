@@ -665,6 +665,9 @@ namespace PSTT.Remote.Tests
             await upstream.PublishAsync("stats/cpu", "30");
             await upstream.PublishAsync("stats/cpu", "40");
 
+            // Let the publishes propagate to the conflation state
+            await Task.Delay(100);
+
             // Release the blocked first send
             sendDelayTcs.SetResult();
 

@@ -53,10 +53,11 @@ namespace PSTT.Remote.Transport.Tcp
                 {
                     var tcp = await _listener.AcceptTcpClientAsync(ct);
                     var transport = new TcpTransport(tcp);
-                    transport.StartReceiving();
 
                     if (ClientConnected != null)
                         await ClientConnected.Invoke(transport);
+
+                    transport.StartReceiving();
                 }
                 catch (OperationCanceledException) { break; }
                 catch (SocketException) when (ct.IsCancellationRequested) { break; }

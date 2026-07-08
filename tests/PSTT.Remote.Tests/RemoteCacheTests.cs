@@ -607,10 +607,38 @@ namespace PSTT.Remote.Tests
         public void TcpClient_InvalidPort_Throws()
             => Assert.Throws<ArgumentOutOfRangeException>(() => new TcpClientTransport("host", 0));
 
+        private class TestDispatcher : PSTT.Data.ICallbackDispatcher
+        {
+            public string Name => "Test";
+            public bool WaitsForCompletion => false;
+            public int ActiveTasks => _activeTasks;
+            private int _activeTasks = 0;
+            private readonly object _lock = new();
+
+            public async Task DispatchAsync(Func<Task> callback, CancellationToken cancellationToken = default)
+            {
+                lock (_lock) { _activeTasks++; }
+                _ = Task.Run(async () =>
+                {
+                    try { await callback(); }
+                    finally
+                    {
+                        lock (_lock) { _activeTasks--; }
+                    }
+                }, cancellationToken);
+                await Task.CompletedTask;
+            }
+        }
+
         [Fact]
         public async Task Server_ConflateUpdates_ConflatesRapidPublishes()
         {
-            var upstream = new CacheWithWildcards<string, string>();
+            var dispatcher = new TestDispatcher();
+            var config = new CacheConfig<string, string>
+            {
+                Dispatcher = dispatcher
+            };
+            var upstream = new CacheWithWildcards<string, string>(config);
             var serverTransport = new MockServerTransport();
 
             // Create server with conflation enabled
@@ -647,6 +675,17 @@ namespace PSTT.Remote.Tests
                 await sendDelayTcs.Task;
             });
 
+            static async Task WaitForTasks(TestDispatcher d, int expected, int maxRetries = 500)
+            {
+                for (int i = 0; i < maxRetries; i++)
+                {
+                    if (d.ActiveTasks == expected)
+                        return;
+                    await Task.Delay(10);
+                }
+                throw new TimeoutException($"Timed out waiting for active tasks to reach {expected}. Current: {d.ActiveTasks}");
+            }
+
             // Connect client session
             await serverTransport.ConnectClientAsync(clientTransport);
 
@@ -657,16 +696,31 @@ namespace PSTT.Remote.Tests
             // Publish first value upstream. This will trigger a send, which will block on sendDelayTcs
             await upstream.PublishAsync("stats/cpu", "10");
 
-            // Let it propagate
-            await Task.Delay(100);
+            // Wait until the first callback is dispatched and running (which blocks)
+            await WaitForTasks(dispatcher, 1);
+            for (int i = 0; i < 500; i++)
+            {
+                lock (receivedUpdates)
+                {
+                    if (receivedUpdates.Contains("10"))
+                        break;
+                }
+                await Task.Delay(10);
+            }
 
-            // Publish more values in rapid succession while first send is still blocked
+            // Publish more values while first send is still blocked.
+            // We insert small delays to ensure they are dispatched and processed in order
+            // by the ThreadPool, rather than running out-of-order.
             await upstream.PublishAsync("stats/cpu", "20");
+            await Task.Delay(50);
             await upstream.PublishAsync("stats/cpu", "30");
+            await Task.Delay(50);
             await upstream.PublishAsync("stats/cpu", "40");
 
-            // Let the publishes propagate to the conflation state
-            await Task.Delay(100);
+            // Wait until the callbacks for 20, 30, and 40 have finished executing.
+            // Since they return immediately (because IsSending is true), the active tasks count
+            // will drop back to 1 (only the blocked first send remains).
+            await WaitForTasks(dispatcher, 1);
 
             // Release the blocked first send
             sendDelayTcs.SetResult();

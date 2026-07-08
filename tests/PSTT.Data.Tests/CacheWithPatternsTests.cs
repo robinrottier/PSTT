@@ -691,7 +691,7 @@ namespace PSTT.Data.Tests
             Assert.Equal(2, received["building/floor1/#"].Count);
 
             // building/floor1/room1/# should receive only 1
-            Assert.Equal(1, received["building/floor1/room1/#"].Count);
+            Assert.Single(received["building/floor1/room1/#"]);
             Assert.Contains("building/floor1/room1/temp", received["building/floor1/room1/#"]);
 
             ds.Unsubscribe(sub1);
@@ -1176,11 +1176,16 @@ namespace PSTT.Data.Tests
             await TestHelper.WaitForValue<bool>(true, () => callbackInvoked, 20);
             Assert.True(callbackInvoked);
 
-            if (shouldMatch != wcallbackInvoked)
+            if (shouldMatch)
             {
-                Debug.WriteLine($"Failed... pattern:{wildcardPattern}, topic:{testTopic}, result:{wcallbackInvoked}");
+                await TestHelper.WaitForValue<bool>(true, () => wcallbackInvoked, 20);
             }
-            Assert.True(shouldMatch == wcallbackInvoked, $"Failed... pattern:{wildcardPattern}, topic:{testTopic}, result:{wcallbackInvoked}");
+            else
+            {
+                await Task.Delay(20);
+            }
+
+            Assert.Equal(shouldMatch, wcallbackInvoked);
 
             ds.Unsubscribe(sub);
             ds.Unsubscribe(subw);

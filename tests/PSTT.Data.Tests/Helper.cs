@@ -125,7 +125,7 @@ namespace PSTT.Data.Tests
                 if (condition())
                     return retry;
             }
-            Assert.True(false, message ?? $"Condition was not met after {retry} retries.");
+            Assert.Fail(message ?? $"Condition was not met after {retry} retries.");
             return retry;
         }
     }

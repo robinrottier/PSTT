@@ -22,7 +22,7 @@ namespace PSTT.Remote.Transport.WebSocket
 
         public event Func<ReadOnlyMemory<byte>, Task>? MessageReceived;
         public event Func<Task>? Disconnected;
-        public event Func<Task>? Reconnected;
+        public event Func<Task>? Reconnected { add { } remove { } }
 
         public bool IsConnected => _inner?.IsConnected ?? false;
 

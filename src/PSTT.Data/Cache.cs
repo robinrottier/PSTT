@@ -18,6 +18,23 @@ namespace PSTT.Data
 
     }
 
+    class ConflatedSubscriptionUpdate<TKey, TValue> : ISubscription<TKey, TValue>
+        where TKey : notnull
+    {
+        public TKey Key { get; }
+        public TValue Value { get; }
+        public IStatus Status { get; }
+
+        public ConflatedSubscriptionUpdate(TKey key, TValue value, IStatus status)
+        {
+            Key = key;
+            Value = value;
+            Status = status;
+        }
+
+        public void Dispose() { }
+    }
+
     // a single subscription to a topic
     // ...belongs to a wrapper which holds actual key, values and a list of these which get fired to each subscriber
     class Subscription<TKey, TValue> : ISubscription<TKey, TValue>
@@ -27,6 +44,84 @@ namespace PSTT.Data
         public IStatus Status { get { return Collection.Status; } }
         public TValue Value { get { return Collection.Value; } }
         Func<ISubscription<TKey, TValue>, Task> Callback { get; }
+
+        private class KeySendState
+        {
+            public bool IsSending;
+            public bool HasPendingUpdate;
+            public TValue? LatestValue;
+            public IStatus? LatestStatus;
+            public readonly object Lock = new object();
+        }
+
+        private readonly ConcurrentDictionary<TKey, KeySendState> _conflatedKeys = new();
+
+        private async Task SendLatestAsync(TKey concreteKey, KeySendState keyState, CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                if (IsActive == false)
+                {
+                    lock (keyState.Lock)
+                    {
+                        keyState.IsSending = false;
+                        keyState.HasPendingUpdate = false;
+                    }
+                    return;
+                }
+
+                TValue? latestValue;
+                IStatus? latestStatus;
+
+                lock (keyState.Lock)
+                {
+                    latestValue = keyState.LatestValue;
+                    latestStatus = keyState.LatestStatus;
+                }
+
+                if (latestStatus == null) return;
+
+                var updateSub = new ConflatedSubscriptionUpdate<TKey, TValue>(concreteKey, latestValue!, latestStatus);
+
+                try
+                {
+                    Interlocked.Increment(ref InCallback);
+                    Interlocked.Increment(ref ActiveCallbacks);
+
+                    // Execute the callback on the thread pool and await it.
+                    // This ensures we conflate updates while the callback is running.
+                    await Task.Run(async () => await Callback(updateSub), cancellationToken);
+                }
+                catch (Exception callbackEx)
+                {
+                    Interlocked.Increment(ref ExceptionInCallback);
+                    var errorHandler = Collection.Source.Config.OnCallbackError;
+                    if (errorHandler != null)
+                    {
+                        try { errorHandler(callbackEx, $"Subscription callback for key '{Collection.Key}' threw exception"); }
+                        catch { }
+                    }
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref ActiveCallbacks);
+                    Interlocked.Decrement(ref InCallback);
+                }
+
+                lock (keyState.Lock)
+                {
+                    if (keyState.HasPendingUpdate)
+                    {
+                        keyState.HasPendingUpdate = false;
+                    }
+                    else
+                    {
+                        keyState.IsSending = false;
+                        break;
+                    }
+                }
+            }
+        }
 
         internal HashSet<TKey>? _initialDeliveredKeys;
         internal readonly object _initialDeliveredLock = new();
@@ -82,6 +177,36 @@ namespace PSTT.Data
                         return;
                     }
                 }
+            }
+
+            if (Collection.Source.Config.ConflateUpdates)
+            {
+                var targetSub = subscription ?? this;
+                var concreteKey = targetSub.Key;
+                var keyState = _conflatedKeys.GetOrAdd(concreteKey, _ => new KeySendState());
+                bool shouldSend = false;
+
+                lock (keyState.Lock)
+                {
+                    keyState.LatestValue = targetSub.Value;
+                    keyState.LatestStatus = targetSub.Status;
+
+                    if (keyState.IsSending)
+                    {
+                        keyState.HasPendingUpdate = true;
+                    }
+                    else
+                    {
+                        keyState.IsSending = true;
+                        shouldSend = true;
+                    }
+                }
+
+                if (shouldSend)
+                {
+                    _ = Task.Run(() => SendLatestAsync(concreteKey, keyState, cancellationToken), cancellationToken);
+                }
+                return;
             }
 
             try

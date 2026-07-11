@@ -129,6 +129,15 @@ namespace PSTT.Data
         }
 
         /// <summary>
+        /// Enables or disables subscription update conflation.
+        /// </summary>
+        public CacheBuilder<TKey, TValue> WithConflateUpdates(bool conflate = true)
+        {
+            _config.ConflateUpdates = conflate;
+            return this;
+        }
+
+        /// <summary>
         /// or the default <see cref="MqttWildcardMatcher"/> when called with no argument.
         /// Implicitly enables wildcard support (equivalent to also calling <see cref="WithWildcards"/>).
         /// </summary>

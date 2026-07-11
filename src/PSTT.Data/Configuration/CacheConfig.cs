@@ -76,5 +76,10 @@ namespace PSTT.Data
         /// restores the original immediate-removal behaviour.
         /// </summary>
         public TimeSpan UnsubscribeGracePeriod { get; set; } = TimeSpan.Zero;
+
+        /// <summary>
+        /// When true, conflates client updates per topic to avoid connection or callback congestion.
+        /// </summary>
+        public bool ConflateUpdates { get; set; } = false;
     }
 }

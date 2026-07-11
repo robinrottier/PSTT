@@ -720,5 +720,59 @@ namespace PSTT.Data.Tests
             // Should throw
             Assert.Throws<ArgumentNullException>(() => CreateHelper(null!));
         }
+
+        [Fact]
+        public async Task Test_SubscriptionConflation_ConflatesRapidPublishes()
+        {
+            var config = new CacheConfig<string, string?>
+            {
+                ConflateUpdates = true
+            };
+            var cache = CreateHelper(config);
+            var topic = "topic/conflate";
+
+            var receivedValues = new List<string?>();
+            var blockCallbackTcs = new TaskCompletionSource();
+
+            var sub = cache.Subscribe(topic, async s =>
+            {
+                if (s.Status.IsPending) return;
+                lock (receivedValues)
+                {
+                    receivedValues.Add(s.Value);
+                }
+                await blockCallbackTcs.Task;
+            });
+
+            // Publish first value. This triggers the callback which blocks on blockCallbackTcs.
+            await cache.PublishAsync(topic, "10");
+
+            // Allow the first callback execution to run and block
+            await Task.Delay(100);
+
+            // Publish more values in rapid succession while the first callback is blocked
+            await cache.PublishAsync(topic, "20");
+            await cache.PublishAsync(topic, "30");
+            await cache.PublishAsync(topic, "40");
+
+            // Unblock the callback
+            blockCallbackTcs.SetResult();
+
+            // Give it a moment to run the queued conflated update
+            await Task.Delay(200);
+
+            lock (receivedValues)
+            {
+                // We expect at most 2 callbacks:
+                // 1. The first value "10"
+                // 2. The latest conflated value "40"
+                // Intermediate values "20" and "30" must be conflated/skipped
+                Assert.Contains("10", receivedValues);
+                Assert.Contains("40", receivedValues);
+                Assert.DoesNotContain("20", receivedValues);
+                Assert.DoesNotContain("30", receivedValues);
+                Assert.True(receivedValues.Count <= 2, $"Expected at most 2 received updates, got {receivedValues.Count}");
+            }
+        }
     }
 }
